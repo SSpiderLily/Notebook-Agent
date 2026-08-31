@@ -1,0 +1,6 @@
+langchain
+langchain-openai
+chromadb
+python-dotenv
+markdown
+tqdm
