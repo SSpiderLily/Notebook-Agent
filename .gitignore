@@ -24,6 +24,7 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .idea/
@@ -31,12 +32,13 @@ ENV/
 *.swp
 *.swo
 
-# Data
-data/chroma/
+# Data（运行时产物整体忽略：SQLite/Chroma/运行记录/LLM录制/备份，见 DESIGN.md 4.3）
+data/
 notebooks/*.db
 
 # Logs
 *.log
+logs/
 
 # Output
 output/
@@ -46,3 +48,6 @@ output/
 
 # ZCode session-local state
 .zcode/
+
+# macOS
+.DS_Store
