@@ -50,6 +50,21 @@ class Run(Base):
     cost_est: Mapped[float | None] = mapped_column(nullable=True)  # 累计预估费用（元）
 
 
+class LLMCall(Base):
+    __tablename__ = "llm_calls"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    stage: Mapped[str] = mapped_column(String(32))
+    caller: Mapped[str] = mapped_column(String(64), default="")
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_tokens: Mapped[int] = mapped_column(default=0)
+    completion_tokens: Mapped[int] = mapped_column(default=0)
+    cost_est: Mapped[float] = mapped_column(default=0.0)
+    retries: Mapped[int] = mapped_column(default=0)
+    status: Mapped[str] = mapped_column(String(16), default="ok")
+    digest: Mapped[str] = mapped_column(String(64), index=True)
+
+
 class Extraction(Base):
     __tablename__ = "extractions"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

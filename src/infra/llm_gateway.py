@@ -27,6 +27,15 @@ class LLMGateway:
         self.calls: list[dict[str, Any]] = []
         self.max_retries = 2
 
+    def _record_usage(self, key: str, prompt: str, response: str, retries: int = 0) -> None:
+        prompt_tokens = max(1, len(prompt) // 4)
+        completion_tokens = max(1, len(response) // 4)
+        cost_est = (prompt_tokens * 2.0 + completion_tokens * 8.0) / 1_000_000
+        if self.cost + cost_est > self.cost_cap:
+            raise LLMCostCapExceeded("已超过 Run 成本上限")
+        self.cost += cost_est
+        self.calls.append({"digest": key, "model": self.model, "mode": self.mode, "status": "ok", "retries": retries, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "cost_est": cost_est})
+
     def _key(self, prompt: str, schema: Any = None) -> str:
         name = getattr(schema, "__name__", "text")
         return hashlib.sha256(f"{self.model}\n{name}\n{prompt}".encode()).hexdigest()
@@ -40,7 +49,7 @@ class LLMGateway:
             if not path.exists():
                 raise LLMReplayMiss(key)
             response = json.loads(path.read_text(encoding="utf-8"))["response"]
-            self.calls.append({"digest": key, "model": self.model, "mode": "replay", "status": "ok"})
+            self._record_usage(key, prompt, response)
             return response
         if self.transport is None:
             try:
@@ -67,7 +76,8 @@ class LLMGateway:
             response = response.choices[0].message.content
         self.root.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"prompt": prompt, "response": response}, ensure_ascii=False), encoding="utf-8")
-        self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "ok", "retries": attempt, "latency_ms": round((time.monotonic() - started) * 1000, 2)})
+        self._record_usage(key, prompt, response, attempt)
+        self.calls[-1]["latency_ms"] = round((time.monotonic() - started) * 1000, 2)
         return response
 
     def structured(self, prompt: str, schema: type[T]) -> T:

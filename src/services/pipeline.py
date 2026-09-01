@@ -11,7 +11,7 @@ from src.infra.llm_gateway import LLMGateway
 from src.infra.logging import add_run_log_file, bind_run, remove_sink, setup_logging
 from src.infra.run_manager import RunManager
 from src.infra.stage_io import StageIO
-from src.models.orm import Base, Event, Extraction
+from src.models.orm import Base, Event, Extraction, LLMCall
 from sqlalchemy import create_engine
 
 
@@ -55,6 +55,9 @@ class Pipeline:
                             continue
                         try:
                             draft = extract_note(self.gateway, note, run_id=run.id)
+                            if self.gateway.calls:
+                                call = self.gateway.calls[-1]
+                                session.add(LLMCall(run_id=run.id, stage="extract", caller="event_extractor", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))
                             extraction = Extraction(note_id=note["note_id"], run_id=run.id, title=draft.title, summary=draft.summary, raw_json=draft.model_dump_json())
                             session.add(extraction); session.flush()
                             for event in draft.events:

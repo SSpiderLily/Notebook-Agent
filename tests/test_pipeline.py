@@ -24,10 +24,11 @@ def test_minimal_pipeline_is_observable_and_executable(tmp_path):
     assert stages['extract'].status == 'done'
     assert pipeline.io.read(run_id, 'extract')['results'][0]['draft']['events'][0]['content'] == '推进项目'
     engine = create_engine(f"sqlite:///{tmp_path / 'db.sqlite'}")
-    from src.models.orm import Extraction, Event
+    from src.models.orm import Extraction, Event, LLMCall
     with Session(engine) as session:
         assert len(session.scalars(select(Extraction)).all()) == 1
         assert len(session.scalars(select(Event)).all()) == 1
+        assert len(session.scalars(select(LLMCall)).all()) == 1
     assert len(pipeline.gateway.calls) == 1
     second = Pipeline(vault, tmp_path / 'db2.sqlite', tmp_path / 'runs2', recordings)
     second.run()
