@@ -29,3 +29,6 @@ def test_minimal_pipeline_is_observable_and_executable(tmp_path):
         assert len(session.scalars(select(Extraction)).all()) == 1
         assert len(session.scalars(select(Event)).all()) == 1
     assert len(pipeline.gateway.calls) == 1
+    second = Pipeline(vault, tmp_path / 'db2.sqlite', tmp_path / 'runs2', recordings)
+    second.run()
+    assert len(second.gateway.calls) == 0

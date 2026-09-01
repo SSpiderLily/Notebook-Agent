@@ -22,6 +22,7 @@ class Pipeline:
         self.io = StageIO(runs_dir)
         self.collector = Collector(vault_dir)
         self.gateway = LLMGateway(recordings_dir, mode=mode)
+        self.snapshot_path = Path(runs_dir).parent / "collection_snapshot.json"
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         Base.metadata.create_all(self.engine)
 
@@ -33,7 +34,15 @@ class Pipeline:
             with bind_run(run.id):
                 self.rm.set_stage(run.id, "init", "running"); self.rm.set_stage(run.id, "init", "done")
                 self.rm.set_stage(run.id, "collect", "running")
-                rows = self.collector.collect(); collect_path = self.io.write(run.id, "collect", rows)
+                rows = self.collector.collect()
+                previous = {}
+                if self.snapshot_path.exists():
+                    previous = json.loads(self.snapshot_path.read_text(encoding="utf-8")).get("notes", {})
+                for row in rows:
+                    row["changed"] = previous.get(row["relative_path"], {}).get("content_hash") != row["content_hash"]
+                self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                self.snapshot_path.write_text(json.dumps({"notes": {r["relative_path"]: r for r in rows}}, ensure_ascii=False), encoding="utf-8")
+                collect_path = self.io.write(run.id, "collect", rows)
                 self.rm.bump_items(run.id, "collect", total=len(rows), done=len(rows))
                 self.rm.set_stage(run.id, "collect", "done", checkpoint_path=str(collect_path))
                 self.rm.set_stage(run.id, "extract", "running")
@@ -41,6 +50,9 @@ class Pipeline:
                 with Session(self.engine) as session:
                     for note in rows:
                         if note["vault_status"] != "active": continue
+                        if not note["changed"]:
+                            self.rm.bump_items(run.id, "extract", done=1)
+                            continue
                         try:
                             draft = extract_note(self.gateway, note, run_id=run.id)
                             extraction = Extraction(note_id=note["note_id"], run_id=run.id, title=draft.title, summary=draft.summary, raw_json=draft.model_dump_json())
