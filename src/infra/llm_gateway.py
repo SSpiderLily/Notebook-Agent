@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -24,6 +25,7 @@ class LLMGateway:
         self.root, self.mode, self.model, self.cost_cap, self.transport = Path(recordings_dir), mode.lower(), model, cost_cap, transport
         self.cost = 0.0
         self.calls: list[dict[str, Any]] = []
+        self.max_retries = 2
 
     def _key(self, prompt: str, schema: Any = None) -> str:
         name = getattr(schema, "__name__", "text")
@@ -41,11 +43,31 @@ class LLMGateway:
             self.calls.append({"digest": key, "model": self.model, "mode": "replay", "status": "ok"})
             return response
         if self.transport is None:
-            raise RuntimeError("RECORD 模式需要注入 transport")
-        response = self.transport(prompt)
+            try:
+                from litellm import completion
+            except ImportError as exc:
+                raise RuntimeError("未安装 LiteLLM，无法执行真实调用") from exc
+            def invoke(_: str) -> Any:
+                return completion(model=self.model, messages=[{"role": "user", "content": prompt}])
+            transport = invoke
+        else:
+            transport = self.transport
+        response = None
+        started = time.monotonic()
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = transport(prompt)
+                break
+            except Exception:
+                if attempt >= self.max_retries:
+                    self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "failed", "retries": attempt})
+                    raise
+                time.sleep(0.05 * (2 ** attempt))
+        if not isinstance(response, str):
+            response = response.choices[0].message.content
         self.root.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"prompt": prompt, "response": response}, ensure_ascii=False), encoding="utf-8")
-        self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "ok"})
+        self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "ok", "retries": attempt, "latency_ms": round((time.monotonic() - started) * 1000, 2)})
         return response
 
     def structured(self, prompt: str, schema: type[T]) -> T:
