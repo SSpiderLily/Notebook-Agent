@@ -50,6 +50,27 @@ class Run(Base):
     cost_est: Mapped[float | None] = mapped_column(nullable=True)  # 累计预估费用（元）
 
 
+class Extraction(Base):
+    __tablename__ = "extractions"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    note_id: Mapped[str] = mapped_column(String(64), index=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    title: Mapped[str] = mapped_column(String(512))
+    summary: Mapped[str] = mapped_column(String)
+    raw_json: Mapped[str] = mapped_column(String)
+
+
+class Event(Base):
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    note_id: Mapped[str] = mapped_column(String(64), index=True)
+    extraction_id: Mapped[int] = mapped_column(index=True)
+    content: Mapped[str] = mapped_column(String)
+    time_clue: Mapped[str | None] = mapped_column(String, nullable=True)
+    status_clue: Mapped[str | None] = mapped_column(String, nullable=True)
+    order_in_note: Mapped[int] = mapped_column(default=0)
+
+
 class Stage(Base):
     """阶段状态机：pending → running → done | failed | skipped。"""
 
