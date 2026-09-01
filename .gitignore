@@ -49,5 +49,8 @@ output/
 # ZCode session-local state
 .zcode/
 
+# Obsidian 编辑器本地配置（仓库内 .md 内容仍会被提交）
+dev-log/.obsidian/
+
 # macOS
 .DS_Store
