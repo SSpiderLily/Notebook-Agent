@@ -30,16 +30,28 @@ class Pipeline:
         """按 extract 产物中的失败清单重试，不重跑已成功条目。"""
         artifact = self.io.read(run_id, "extract")
         retried, failures = [], []
-        for item in artifact.get("failures", []):
-            matches = [n for n in self.collector.collect() if n["note_id"] == item["note_id"] and n["vault_status"] == "active"]
-            if not matches:
-                failures.append(item); continue
-            try:
-                draft = extract_note(self.gateway, matches[0], run_id=run_id)
-                retried.append({"note_id": item["note_id"], "draft": draft.model_dump()})
-            except ExtractionError as exc:
-                failures.append({"note_id": item["note_id"], "error": str(exc)})
-        return {"retried": retried, "failures": failures}
+        current = {n["note_id"]: n for n in self.collector.collect()}
+        with Session(self.engine) as session:
+            for item in artifact.get("failures", []):
+                note = current.get(item["note_id"])
+                if not note or note["vault_status"] != "active":
+                    failures.append(item)
+                    continue
+                try:
+                    draft = extract_note(self.gateway, note, run_id=run_id)
+                    extraction = Extraction(note_id=note["note_id"], run_id=run_id, title=draft.title, summary=draft.summary, raw_json=draft.model_dump_json())
+                    session.add(extraction)
+                    session.flush()
+                    for event in draft.events:
+                        session.add(Event(note_id=note["note_id"], extraction_id=extraction.id, content=event.content, time_clue=event.time_clue, status_clue=event.status_clue, order_in_note=event.order_in_note))
+                    retried.append({"note_id": item["note_id"], "draft": draft.model_dump()})
+                except ExtractionError as exc:
+                    failures.append({"note_id": item["note_id"], "error": str(exc)})
+            session.commit()
+        updated = {"results": artifact.get("results", []) + retried, "failures": failures}
+        self.io.write(run_id, "extract", updated)
+        updated["retried"] = retried
+        return updated
 
     def run(self) -> str:
         setup_logging()
