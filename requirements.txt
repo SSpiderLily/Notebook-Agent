@@ -48,6 +48,8 @@ langgraph-prebuilt==1.1.0
 langgraph-sdk==0.4.4
 langsmith==0.11.2
 loguru==0.7.3
+litellm
+langgraph==1.2.11
 mako==1.4.1
 markdown==3.10.3
 markdown-it-py==4.2.0

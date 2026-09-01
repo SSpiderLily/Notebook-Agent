@@ -265,7 +265,7 @@ logs/  (noteagent.log, runs/<run_id>.log)
 
 ## 九、技术选型汇总
 
-- **后端**：Python 3.12、FastAPI、uvicorn、SQLAlchemy 2.0、Alembic、pydantic v2、pydantic-settings、loguru、langchain + langchain-openai、chromadb、PyYAML、httpx
+- **后端**：Python 3.12、FastAPI、uvicorn、SQLAlchemy 2.0、Alembic、pydantic v2、pydantic-settings、loguru、LiteLLM、LangGraph、langchain-core、chromadb、PyYAML、httpx
 - **测试**：pytest、pytest-asyncio；核心模块全覆盖（infra/解析/对账/树构建/写回安全），LLM 一律走回放夹具
 - **前端**：Vite、Vue 3、Element Plus
 - **环境管理**：建议 uv（或 venv+pip）；requirements.txt 同步维护
@@ -286,3 +286,5 @@ logs/  (noteagent.log, runs/<run_id>.log)
 | 08-31 | 首跑试算 + 子目录试跑 | 触发前知道规模与费用，避免盲跑 |
 | 08-31 | LLM 录制/回放模式，与 pytest 桩同源 | 调试免费、结果可复现、CI 无网络依赖 |
 | 08-31 | 向量库模型指纹校验 | 切换 embedding 模型后相似度静默失效的防护 |
+| 09-01 | LiteLLM 作为 LLM Provider，保留 NoteAgent LLMGateway 为唯一出口 | 统一供应商适配，同时保留 run/stage、成本、台账和回放边界 |
+| 09-01 | 树重建与问答 Agent 采用 LangGraph | 用显式状态图管理工具调用、长流程恢复和多轮会话 |
