@@ -26,6 +26,21 @@ class Pipeline:
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         Base.metadata.create_all(self.engine)
 
+    def retry_failed(self, run_id: str) -> dict:
+        """按 extract 产物中的失败清单重试，不重跑已成功条目。"""
+        artifact = self.io.read(run_id, "extract")
+        retried, failures = [], []
+        for item in artifact.get("failures", []):
+            matches = [n for n in self.collector.collect() if n["note_id"] == item["note_id"] and n["vault_status"] == "active"]
+            if not matches:
+                failures.append(item); continue
+            try:
+                draft = extract_note(self.gateway, matches[0], run_id=run_id)
+                retried.append({"note_id": item["note_id"], "draft": draft.model_dump()})
+            except ExtractionError as exc:
+                failures.append({"note_id": item["note_id"], "error": str(exc)})
+        return {"retried": retried, "failures": failures}
+
     def run(self) -> str:
         setup_logging()
         run = self.rm.start_run(scope=str(self.collector.vault), trigger="pipeline")
