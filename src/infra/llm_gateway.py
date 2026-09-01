@@ -23,6 +23,7 @@ class LLMGateway:
     def __init__(self, recordings_dir: Path | str, mode: str = "replay", model: str = "test", cost_cap: float = 20.0, transport: Callable[[str], str] | None = None):
         self.root, self.mode, self.model, self.cost_cap, self.transport = Path(recordings_dir), mode.lower(), model, cost_cap, transport
         self.cost = 0.0
+        self.calls: list[dict[str, Any]] = []
 
     def _key(self, prompt: str, schema: Any = None) -> str:
         name = getattr(schema, "__name__", "text")
@@ -36,12 +37,15 @@ class LLMGateway:
         if self.mode == "replay":
             if not path.exists():
                 raise LLMReplayMiss(key)
-            return json.loads(path.read_text(encoding="utf-8"))["response"]
+            response = json.loads(path.read_text(encoding="utf-8"))["response"]
+            self.calls.append({"digest": key, "model": self.model, "mode": "replay", "status": "ok"})
+            return response
         if self.transport is None:
             raise RuntimeError("RECORD 模式需要注入 transport")
         response = self.transport(prompt)
         self.root.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"prompt": prompt, "response": response}, ensure_ascii=False), encoding="utf-8")
+        self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "ok"})
         return response
 
     def structured(self, prompt: str, schema: type[T]) -> T:
