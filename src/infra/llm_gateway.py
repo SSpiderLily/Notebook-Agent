@@ -21,8 +21,9 @@ class LLMCostCapExceeded(RuntimeError):
 
 
 class LLMGateway:
-    def __init__(self, recordings_dir: Path | str, mode: str = "replay", model: str = "test", cost_cap: float = 20.0, transport: Callable[[str], str] | None = None):
+    def __init__(self, recordings_dir: Path | str, mode: str = "replay", model: str = "test", cost_cap: float = 20.0, transport: Callable[[str], str] | None = None, api_base: str | None = None, api_key: str | None = None):
         self.root, self.mode, self.model, self.cost_cap, self.transport = Path(recordings_dir), mode.lower(), model, cost_cap, transport
+        self.api_base, self.api_key = api_base, api_key
         self.cost = 0.0
         self.calls: list[dict[str, Any]] = []
         self.max_retries = 2
@@ -57,7 +58,8 @@ class LLMGateway:
             except ImportError as exc:
                 raise RuntimeError("未安装 LiteLLM，无法执行真实调用") from exc
             def invoke(_: str) -> Any:
-                return completion(model=self.model, messages=[{"role": "user", "content": prompt}])
+                model = self.model if "/" in self.model else f"openai/{self.model}"
+                return completion(model=model, messages=[{"role": "user", "content": prompt}], api_base=self.api_base, api_key=self.api_key)
             transport = invoke
         else:
             transport = self.transport
@@ -83,7 +85,13 @@ class LLMGateway:
     def structured(self, prompt: str, schema: type[T]) -> T:
         raw = self.chat(prompt)
         try:
-            value = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(raw, str):
+                normalized = raw.strip()
+                if normalized.startswith("```") and normalized.endswith("```"):
+                    normalized = normalized.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                value = json.loads(normalized)
+            else:
+                value = raw
             return schema.model_validate(value)
         except (json.JSONDecodeError, ValidationError) as exc:
             raise ValueError("LLM 结构化输出校验失败") from exc
