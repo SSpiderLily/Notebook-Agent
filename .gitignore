@@ -33,7 +33,7 @@ ENV/
 *.swo
 
 # Data（运行时产物整体忽略：SQLite/Chroma/运行记录/LLM录制/备份，见 DESIGN.md 4.3）
-data/
+/data/
 notebooks/*.db
 
 # Logs
