@@ -25,7 +25,21 @@ STAGE_ORDER: list[str] = [
 ]
 
 RUN_STATUSES = ("running", "done", "failed", "cancelled")
+# 终态（不可再 bump/set_stage/finish 之外再变更）；running 为唯一活跃态兼互斥锁
+TERMINAL_RUN_STATUSES = ("done", "failed", "cancelled")
 STAGE_STATUSES = ("pending", "running", "done", "failed", "skipped")
+# 阶段终态：一旦进入不可再转移（重跑即新 Run）
+STAGE_TERMINAL_STATUSES = ("done", "failed", "skipped")
+
+# 合法阶段迁移白名单（DESIGN.md 3.1：pending → running → done | failed | skipped）。
+# 允许同状态自转到自身，作为幂等 no-op（防御重复落库）。
+ALLOWED_STAGE_TRANSITIONS: dict[str, frozenset[str]] = {
+    "pending": frozenset({"pending", "running", "skipped"}),
+    "running": frozenset({"running", "done", "failed", "skipped"}),
+    "done": frozenset({"done"}),
+    "failed": frozenset({"failed"}),
+    "skipped": frozenset({"skipped"}),
+}
 
 
 def now_iso() -> str:

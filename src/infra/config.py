@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 
 # 默认费率表（估算值，单位：元/百万 token，[输入, 输出]）。
 # 仅用于成本护栏与试算预估，实际以服务商账单为准；切换模型时在 .env 覆盖。
@@ -73,6 +74,44 @@ class Settings(BaseSettings):
     # ── 树重建 Agent 护栏（DESIGN.md 6.1）──
     agent_max_steps: int = 12  # 每个事件最大步数
     confidence_review_threshold: float = 0.6  # 低于此置信度进入人工复核队列
+
+    @field_validator('host')
+    @classmethod
+    def valid_host(cls, value):
+        if value not in {'127.0.0.1', 'localhost', '::1'}:
+            raise ValueError('host 必须为本机地址')
+        return value
+
+    @field_validator('price_table')
+    @classmethod
+    def valid_prices(cls, value):
+        if not value or any(len(pair) != 2 or any(float(rate) <= 0 for rate in pair) for pair in value.values()):
+            raise ValueError('费率必须为正数且不可为空')
+        return value
+
+    @field_validator('llm_run_cost_cap_cny', 'llm_timeout_s')
+    @classmethod
+    def valid_positive_float(cls, value):
+        if value <= 0: raise ValueError('数值配置必须为正数')
+        return value
+
+    @field_validator('port')
+    @classmethod
+    def valid_port(cls, value):
+        if not 1 <= value <= 65535: raise ValueError('port 必须在 1..65535')
+        return value
+
+    @field_validator('llm_concurrency', 'llm_max_retries', 'llm_schema_fix_retries', 'backup_keep', 'artifact_versions_keep', 'agent_max_steps')
+    @classmethod
+    def valid_positive(cls, value):
+        if value < 0: raise ValueError('数值配置不可为负')
+        return value
+
+    @field_validator('confidence_review_threshold')
+    @classmethod
+    def valid_confidence(cls, value):
+        if not 0 <= value <= 1: raise ValueError('置信度必须在 0..1')
+        return value
 
     # ── 派生路径（运行时目录统一从这里取，避免散落拼接）──
     @property

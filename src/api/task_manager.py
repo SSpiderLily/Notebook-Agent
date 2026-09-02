@@ -92,7 +92,7 @@ class TaskManager:
                 pipeline.run(
                     run_id=run.id,
                     trigger="api",
-                    scope=run.scope,
+                    scope=scope,
                     should_cancel=cancel_event.is_set,
                 )
             finally:

@@ -44,16 +44,24 @@ def setup_logging(settings: Settings | None = None) -> None:
 
 @contextmanager
 def bind_run(run_id: str, stage: str = "") -> Iterator[None]:
-    """在上下文内为所有日志绑定 run_id（与可选 stage）。"""
-    extra = {"run_id": run_id}
+    """在上下文内为所有日志绑定安全的 run_id（与可选 stage）。"""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(run_id)):
+        raise ValueError("非法 run_id")
+    if stage and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(stage)):
+        raise ValueError("非法 stage")
+    extra = {"run_id": str(run_id)}
     if stage:
-        extra["stage"] = stage
+        extra["stage"] = str(stage)
     with logger.contextualize(**extra):
         yield
 
 
 def add_run_log_file(run_id: str, settings: Settings | None = None) -> int:
     """为单次运行添加独立日志文件，返回 sink id（结束时用 remove_sink 移除）。"""
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", str(run_id)):
+        raise ValueError("非法 run_id")
     settings = settings or get_settings()
     run_logs_dir = settings.logs_dir / "runs"
     run_logs_dir.mkdir(parents=True, exist_ok=True)

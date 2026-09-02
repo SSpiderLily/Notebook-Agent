@@ -157,6 +157,20 @@ class ChromaVectorStore(BaseVectorStore):
     def add_notes(self, notes: list): self._add(self.notes, notes)
     def add_events(self, events: list): self._add(self.events, events)
 
+    def delete_events_by_note(self, note_ids: Iterable[str]) -> None:
+        """删除指定笔记（note_id 元数据）下的全部事件向量。
+
+        用于事件向量旧数据清理：笔记重提炼会生成新的 extraction_id，按稳定
+        note_id 维度整批删除可避免旧向量残留。Chroma 的 where 删除对不存在的
+        note_id 幂等（无匹配即无操作）。
+        """
+        for nid in note_ids:
+            try:
+                self.events.delete(where={"note_id": str(nid)})
+            except Exception:
+                # 无匹配或集合级异常均视为幂等 no-op，不阻断后续清理
+                continue
+
     def _search(self, collection, query, k):
         result = collection.query(query_texts=[query], n_results=k)
         ids = result.get("ids", [[]])[0]

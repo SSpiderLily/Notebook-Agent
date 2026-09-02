@@ -83,40 +83,61 @@ def cancel(run_id: str, tm: TaskManager = Depends(get_task_manager)):
         raise HTTPException(status_code=404, detail={"code": "run_not_found", "message": f"Run 不存在: {run_id}", "detail": None})
     if run.status != "running":
         raise HTTPException(status_code=409, detail={"code": "run_not_active", "message": f"Run 非运行中: {run.status}", "detail": None})
-    tm.cancel(run_id)
+    # 以 tm.cancel 的实际结果为准：无已注册协作取消信号（非本管理器启动）视为取消失败
+    if not tm.cancel(run_id):
+        raise HTTPException(status_code=409, detail={"code": "cancel_failed", "message": "该任务无法协作式取消（无已注册取消信号）", "detail": None})
     return {"accepted": True, "run_id": run_id}
 
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
 @router.get("/{run_id}/stream")
-async def stream(run_id: str, tm: TaskManager = Depends(get_task_manager)):
-    """SSE 进度：阶段状态/条目计数变化即推送，Run 结束推 done 事件并关闭。"""
+async def stream(run_id: str, request: Request, tm: TaskManager = Depends(get_task_manager)):
+    """SSE 进度：阶段状态/条目计数变化即推送，空闲期发心跳保活，Run 结束推 done 并关闭。"""
     if tm.get(run_id) is None:
         raise HTTPException(status_code=404, detail={"code": "run_not_found", "message": f"Run 不存在: {run_id}", "detail": None})
 
     async def gen():
         last: dict[str, tuple] = {}
-        while True:
-            run = tm.get(run_id)
-            if run is None:
-                yield f"data: {json.dumps({'event': 'done', 'status': 'unknown', 'run_id': run_id}, ensure_ascii=False)}\n\n"
-                return
-            for s in tm.stages(run_id):
-                state = (s.status, s.items_done, s.items_failed, s.items_total)
-                if last.get(s.stage) != state:
-                    last[s.stage] = state
-                    payload = {
-                        "stage": s.stage,
-                        "status": s.status,
-                        "items_done": s.items_done,
-                        "items_total": s.items_total,
-                        "items_failed": s.items_failed,
-                        "cost_est": run.cost_est,
-                        "run_id": run_id,
-                    }
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            if run.status != "running":
-                yield f"data: {json.dumps({'event': 'done', 'status': run.status, 'run_id': run_id}, ensure_ascii=False)}\n\n"
-                return
-            await asyncio.sleep(0.2)
+        try:
+            while True:
+                # 客户端断开：尽早退出，避免后台生成器空转
+                if await request.is_disconnected():
+                    break
+                run = tm.get(run_id)
+                if run is None:
+                    yield f"data: {json.dumps({'event': 'done', 'status': 'unknown', 'run_id': run_id}, ensure_ascii=False)}\n\n"
+                    return
+                emitted = False
+                for s in tm.stages(run_id):
+                    state = (s.status, s.items_done, s.items_failed, s.items_total)
+                    if last.get(s.stage) != state:
+                        last[s.stage] = state
+                        payload = {
+                            "stage": s.stage,
+                            "status": s.status,
+                            "items_done": s.items_done,
+                            "items_total": s.items_total,
+                            "items_failed": s.items_failed,
+                            "cost_est": run.cost_est,
+                            "run_id": run_id,
+                        }
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        emitted = True
+                if run.status != "running":
+                    yield f"data: {json.dumps({'event': 'done', 'status': run.status, 'run_id': run_id}, ensure_ascii=False)}\n\n"
+                    return
+                if not emitted:
+                    # 心跳注释行：保持连接活跃（代理/中间层超时防护）
+                    yield ": ping\n\n"
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            # 客户端断开导致的生成器取消：正常收尾，不吞异常
+            raise
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=_SSE_HEADERS)

@@ -35,7 +35,11 @@ class Collector:
     def collect(self) -> list[dict[str, Any]]:
         rows = []
         for raw in self.loader.load_all():
-            parsed = self.parser.parse(raw["content"], raw["filepath"])
+            try:
+                parsed = self.parser.parse(raw["content"], raw["filepath"])
+            except Exception as exc:
+                rows.append({**raw, "metadata": {}, "tags": [], "links": [], "vault_status": "active", "ignore_reason": None, "parse_status": "failed", "parse_error": str(exc)})
+                continue
             fm_ignore = parsed["metadata"].get("noteagent") == "ignore" or parsed["metadata"].get("noteagent:ignore") is True
             glob_ignore = next((pat for pat in self.settings.ignore_paths if fnmatch.fnmatch(raw["relative_path"], pat)), None)
             if fm_ignore or glob_ignore:
