@@ -65,6 +65,22 @@ class LLMCall(Base):
     digest: Mapped[str] = mapped_column(String(64), index=True)
 
 
+class Note(Base):
+    """采集登记（DESIGN.md 4.1 notes）：稳定 hash 为主键，增量判断与对账状态。"""
+
+    __tablename__ = "notes"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)  # note_id 稳定 hash
+    path: Mapped[str] = mapped_column(String(512), default="")
+    folder: Mapped[str] = mapped_column(String(256), default="")
+    filename: Mapped[str] = mapped_column(String(256), default="")
+    mtime: Mapped[float | None] = mapped_column(nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    parse_status: Mapped[str] = mapped_column(String(16), default="ok")
+    vault_status: Mapped[str] = mapped_column(String(16), default="active")  # active/missing/ignored
+    last_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
 class Extraction(Base):
     __tablename__ = "extractions"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -72,6 +88,9 @@ class Extraction(Base):
     run_id: Mapped[str] = mapped_column(String(36), index=True)
     title: Mapped[str] = mapped_column(String(512))
     summary: Mapped[str] = mapped_column(String)
+    keywords: Mapped[str] = mapped_column(String, default="[]")  # JSON list
+    candidate_tags: Mapped[str] = mapped_column(String, default="[]")  # JSON list
+    model: Mapped[str] = mapped_column(String(128), default="")
     raw_json: Mapped[str] = mapped_column(String)
 
 
@@ -84,6 +103,24 @@ class Event(Base):
     time_clue: Mapped[str | None] = mapped_column(String, nullable=True)
     status_clue: Mapped[str | None] = mapped_column(String, nullable=True)
     order_in_note: Mapped[int] = mapped_column(default=0)
+
+
+class Association(Base):
+    """笔记间关联（DESIGN.md 4.1 associations，FR-3）：带证据的关联判定结果。"""
+
+    __tablename__ = "associations"
+    __table_args__ = (
+        # 幂等：同一有向关联只保留最新判定（重跑更新而非累积重复）
+        UniqueConstraint("src_type", "src_id", "dst_id", name="uq_association_pair"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    src_type: Mapped[str] = mapped_column(String(16), default="note")
+    src_id: Mapped[str] = mapped_column(String(64), index=True)
+    dst_id: Mapped[str] = mapped_column(String(64), index=True)
+    basis: Mapped[str] = mapped_column(String, default="[]")  # JSON list: folder/naming/semantic/temporal
+    confidence: Mapped[float] = mapped_column(default=0.0)
+    evidence: Mapped[str] = mapped_column(String, default="[]")  # JSON list
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
 
 
 class Stage(Base):
