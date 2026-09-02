@@ -60,14 +60,35 @@ class Pipeline:
         updated["retried"] = retried
         return updated
 
-    def run(self) -> str:
+    def run(self, run_id: str | None = None, *, trigger: str = "pipeline", scope: str | None = None, should_cancel: Callable[[], bool] | None = None) -> str:
+        """执行整理流水线。
+
+        未传 run_id 时自行 start_run（触发主体=trigger，scope 默认全仓库）；传入预创建 run_id
+        时直接使用该 Run（互斥/scope 已由上层 RunManager 保证，供 API/TaskManager 使用，避免
+        二次 start_run 触发互斥）。每个阶段切换前检查 should_cancel()，收到取消信号则协作式
+        收尾为 cancelled（M0 为阶段边界粒度，随后续里程碑细化到条目级）。
+        """
         setup_logging()
-        run = self.rm.start_run(scope=str(self.collector.vault), trigger="pipeline")
-        sink = add_run_log_file(run.id)
+        if run_id is None:
+            run = self.rm.start_run(scope=scope or str(self.collector.vault), trigger=trigger)
+            run_id = run.id
+        sink = add_run_log_file(run_id)
+        cancelled = (lambda: bool(should_cancel and should_cancel())) if should_cancel else (lambda: False)
+
+        def finish_cancelled() -> None:
+            try:
+                self.rm.finish_run(run_id, "cancelled")
+            except LookupError:
+                pass  # 已被提前终结（如取消发生在收尾之后），幂等忽略
+
         try:
-            with bind_run(run.id):
-                self.rm.set_stage(run.id, "init", "running"); self.rm.set_stage(run.id, "init", "done")
-                self.rm.set_stage(run.id, "collect", "running")
+            with bind_run(run_id):
+                if cancelled():
+                    finish_cancelled(); return run_id
+                self.rm.set_stage(run_id, "init", "running"); self.rm.set_stage(run_id, "init", "done")
+                if cancelled():
+                    finish_cancelled(); return run_id
+                self.rm.set_stage(run_id, "collect", "running")
                 rows = self.collector.collect()
                 previous = {}
                 if self.snapshot_path.exists():
@@ -76,7 +97,7 @@ class Pipeline:
                     row["changed"] = previous.get(row["relative_path"], {}).get("content_hash") != row["content_hash"]
                 self.snapshot_path.parent.mkdir(parents=True, exist_ok=True)
                 self.snapshot_path.write_text(json.dumps({"notes": {r["relative_path"]: r for r in rows}}, ensure_ascii=False), encoding="utf-8")
-                collect_path = self.io.write(run.id, "collect", rows)
+                collect_path = self.io.write(run_id, "collect", rows)
                 with Session(self.engine) as session:
                     for note in rows:
                         record = session.get(Note, note["note_id"])
@@ -89,42 +110,49 @@ class Pipeline:
                         record.content_hash = note.get("content_hash", "")
                         record.parse_status = note.get("parse_status", "ok")
                         record.vault_status = note.get("vault_status", "active")
-                        record.last_run_id = run.id
+                        record.last_run_id = run_id
                     session.commit()
-                self.rm.bump_items(run.id, "collect", total=len(rows), done=len(rows))
-                self.rm.set_stage(run.id, "collect", "done", checkpoint_path=str(collect_path))
-                self.rm.set_stage(run.id, "extract", "running")
+                self.rm.bump_items(run_id, "collect", total=len(rows), done=len(rows))
+                self.rm.set_stage(run_id, "collect", "done", checkpoint_path=str(collect_path))
+                if cancelled():
+                    finish_cancelled(); return run_id
+                self.rm.set_stage(run_id, "extract", "running")
                 results, failures = [], []
                 with Session(self.engine) as session:
                     for note in rows:
+                        if cancelled():
+                            break
                         if note["vault_status"] != "active": continue
                         if not note["changed"]:
-                            self.rm.bump_items(run.id, "extract", done=1)
+                            self.rm.bump_items(run_id, "extract", done=1)
                             continue
                         try:
-                            draft = extract_note(self.gateway, note, run_id=run.id)
+                            draft = extract_note(self.gateway, note, run_id=run_id)
                             if self.gateway.calls:
                                 call = self.gateway.calls[-1]
-                                session.add(LLMCall(run_id=run.id, stage="extract", caller="event_extractor", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))
-                            extraction = Extraction(note_id=note["note_id"], run_id=run.id, title=draft.title, summary=draft.summary, keywords=json.dumps(draft.keywords, ensure_ascii=False), candidate_tags=json.dumps(draft.candidate_tags, ensure_ascii=False), model=getattr(self.gateway, "model", ""), raw_json=draft.model_dump_json())
+                                session.add(LLMCall(run_id=run_id, stage="extract", caller="event_extractor", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))
+                            extraction = Extraction(note_id=note["note_id"], run_id=run_id, title=draft.title, summary=draft.summary, keywords=json.dumps(draft.keywords, ensure_ascii=False), candidate_tags=json.dumps(draft.candidate_tags, ensure_ascii=False), model=getattr(self.gateway, "model", ""), raw_json=draft.model_dump_json())
                             session.add(extraction); session.flush()
                             for event in draft.events:
                                 session.add(Event(note_id=note["note_id"], extraction_id=extraction.id, content=event.content, time_clue=event.time_clue, status_clue=event.status_clue, order_in_note=event.order_in_note))
                             session.commit()
-                            results.append({"note_id": note["note_id"], "draft": draft.model_dump()}); self.rm.bump_items(run.id, "extract", done=1)
+                            results.append({"note_id": note["note_id"], "draft": draft.model_dump()}); self.rm.bump_items(run_id, "extract", done=1)
                         except ExtractionError as exc:
-                            failures.append({"note_id": note["note_id"], "error": str(exc)}); self.rm.bump_items(run.id, "extract", failed=1)
+                            failures.append({"note_id": note["note_id"], "error": str(exc)}); self.rm.bump_items(run_id, "extract", failed=1)
                     session.commit()
-                extract_path = self.io.write(run.id, "extract", {"results": results, "failures": failures})
-                self.rm.bump_items(run.id, "extract", total=len(results) + len(failures))
+                if cancelled():
+                    # 未完成条目不落 extract 产物即可，直接收尾
+                    finish_cancelled(); return run_id
+                extract_path = self.io.write(run_id, "extract", {"results": results, "failures": failures})
+                self.rm.bump_items(run_id, "extract", total=len(results) + len(failures))
                 final = "failed" if failures and not results else "done"
-                self.rm.set_stage(run.id, "extract", final, checkpoint_path=str(extract_path), error=f"{len(failures)} 条失败" if failures else None)
+                self.rm.set_stage(run_id, "extract", final, checkpoint_path=str(extract_path), error=f"{len(failures)} 条失败" if failures else None)
                 if final != "done":
-                    self.rm.set_stage(run.id, "associate", "skipped")
-                    self.rm.finish_run(run.id, final)
-                    return run.id
+                    self.rm.set_stage(run_id, "associate", "skipped")
+                    self.rm.finish_run(run_id, final)
+                    return run_id
                 # ── associate：Chroma 语义 + 结构/时间信号 → 候选 → LLM 判定 → associations 入库 ──
-                self.rm.set_stage(run.id, "associate", "running")
+                self.rm.set_stage(run_id, "associate", "running")
                 store = ChromaVectorStore(self.chroma_path, model_name=self.embedding_model, embedding_function=self.embedding_function)
                 active_ids = [n["note_id"] for n in rows if n["vault_status"] == "active"]
                 assoc_notes: list[dict[str, Any]] = []
@@ -166,7 +194,7 @@ class Pipeline:
                         failed.append({"source_id": cand.source_id, "target_id": cand.target_id, "error": str(exc)})
                 with Session(self.engine) as session:
                     for call in self.gateway.calls[call_start:]:
-                        session.add(LLMCall(run_id=run.id, stage="associate", caller="association_judger", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))
+                        session.add(LLMCall(run_id=run_id, stage="associate", caller="association_judger", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))
                     cand_by_pair = {(c.source_id, c.target_id): c for c in candidates}
                     for j in judgements:
                         if not j.related:
@@ -181,14 +209,18 @@ class Pipeline:
                         association.basis = json.dumps(basis, ensure_ascii=False)
                         association.confidence = j.confidence
                         association.evidence = json.dumps(j.evidence, ensure_ascii=False)
-                        association.run_id = run.id
+                        association.run_id = run_id
                     session.commit()
-                assoc_path = self.io.write(run.id, "associate", {"candidates": [c.model_dump() for c in candidates], "judgements": [j.model_dump() for j in judgements], "failures": failed})
-                self.rm.bump_items(run.id, "associate", total=len(candidates), done=len(judgements), failed=len(failed))
-                self.rm.set_stage(run.id, "associate", "done", checkpoint_path=str(assoc_path))
-                self.rm.finish_run(run.id, "done")
-                return run.id
+                assoc_path = self.io.write(run_id, "associate", {"candidates": [c.model_dump() for c in candidates], "judgements": [j.model_dump() for j in judgements], "failures": failed})
+                self.rm.bump_items(run_id, "associate", total=len(candidates), done=len(judgements), failed=len(failed))
+                self.rm.set_stage(run_id, "associate", "done", checkpoint_path=str(assoc_path))
+                self.rm.finish_run(run_id, "done")
+                return run_id
         except Exception:
-            self.rm.finish_run(run.id, "failed"); raise
+            try:
+                self.rm.finish_run(run_id, "failed")
+            except LookupError:
+                pass
+            raise
         finally:
             remove_sink(sink)
