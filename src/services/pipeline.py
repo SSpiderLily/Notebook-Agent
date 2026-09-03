@@ -24,7 +24,12 @@ from src.models.orm import (
     Extraction,
     LLMCall,
     Note,
+    Tree,
+    TreeNode,
 )
+from src.agents.tree_builder import TreeBuilder
+from src.core.tree_rebuild import DraftForest, DraftTree, TreeAssignment, merge_verified_forest
+from src.core.status import judge_forest, save_statuses
 
 
 class Pipeline:
@@ -339,6 +344,116 @@ class Pipeline:
                 assoc_path = self.io.write(run_id, "associate", {"candidates": [c.model_dump() for c in candidates], "judgements": [j.model_dump() for j in judgements], "failures": failed})
                 self.rm.bump_items(run_id, "associate", total=len(candidates), done=len(judgements), failed=len(failed))
                 self.rm.set_stage(run_id, "associate", "done", checkpoint_path=str(assoc_path))
+
+                # M4：树重建与状态判定。阶段输入始终从已持久化的 events/associations
+                # 读取，避免依赖抽取阶段的临时对象；结果先写 StageIO，便于断点续跑与审阅。
+                self.rm.set_stage(run_id, "tree_rebuild", "running")
+                assignments, tree_nodes, tree_ids = [], [], set()
+                # 加载已验证树（追加原则：只读快照，绝不自动重组）
+                verified_trees: dict[str, Any] = {}
+                verified_tree_ids: set[str] = set()
+                with Session(self.engine) as session:
+                    for t in session.scalars(select(Tree).where(Tree.verified.is_(True))):
+                        nodes = list(session.scalars(select(TreeNode).where(TreeNode.tree_id == t.id).order_by(TreeNode.order)))
+                        verified_trees[t.id] = DraftTree(
+                            id=t.id, title=t.title or "", root_note_id=t.root_note_id,
+                            verified=True, locked=True, confidence=t.confidence,
+                            nodes=[
+                                {"id": str(n.id), "tree_id": n.tree_id, "event_id": n.event_id or 0,
+                                 "note_id": n.note_id, "parent_event_id": None, "order": n.order,
+                                 "confidence": n.confidence, "evidence": json.loads(n.evidence or "[]"),
+                                 "origin": n.origin}
+                                for n in nodes
+                            ],
+                        )
+                    verified_tree_ids = set(verified_trees)
+                    event_data = [
+                        {"event_id": e.id, "note_id": e.note_id, "content": e.content,
+                         "time_clue": e.time_clue or "", "status_clue": e.status_clue or "",
+                         "order_in_note": e.order_in_note}
+                        for e in session.scalars(select(Event).order_by(Event.id))
+                    ]
+                builder = TreeBuilder(self.gateway)
+                for event in event_data:
+                    try:
+                        result = builder.run({**event, "associations": []}, verified_tree_ids=verified_tree_ids)
+                        item = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+                    except Exception as exc:
+                        # Replay fixtures from pre-M4 runs contain no agent responses.
+                        item = {"tree_id": "NEW", "parent_event_id": None,
+                                "confidence": 0.0, "evidence": f"agent_error: {exc}", "action": "append"}
+                    item["event_id"] = event["event_id"]
+                    item["note_id"] = event["note_id"]
+                    assignments.append(item)
+                    tree_id = item.get("tree_id", "NEW")
+                    if tree_id != "NEW": tree_ids.add(tree_id)
+                    tree_nodes.append({"event_id": event["event_id"], "note_id": event["note_id"],
+                                       "tree_id": tree_id, "parent_event_id": item.get("parent_event_id"),
+                                       "confidence": item.get("confidence", 0.0), "evidence": item.get("evidence", "")})
+                # 应用追加原则：verified 树原样保留，非法重组归入 rejected（进人工复核队列）
+                draft = DraftForest(
+                    assignments=[
+                        TreeAssignment(**{**a, "event_id": a.get("event_id"), "note_id": a.get("note_id")})
+                        for a in assignments
+                    ]
+                )
+                merged, rejected_reasons = merge_verified_forest(draft, verified_trees)
+                # 持久化草稿/挂接到的树到 trees/tree_nodes（幂等：verified 树不重写）
+                with Session(self.engine) as session:
+                    for t in merged.trees:
+                        if t.id in verified_tree_ids:
+                            continue  # 已验证树已存在，不重写、不重组
+                        tree = session.get(Tree, t.id)
+                        if tree is None:
+                            tree = Tree(id=t.id, title=t.title or "未命名树", root_note_id=t.root_note_id,
+                                        status="in_progress", confidence=t.confidence,
+                                        verified=False, locked=False, evidence=json.dumps(t.evidence or [], ensure_ascii=False),
+                                        run_id=run_id)
+                            session.add(tree)
+                        # 追加节点（同 tree+event 已存在则跳过，保证幂等）
+                        for i, nd in enumerate(t.nodes):
+                            exists = session.scalar(select(TreeNode).where(TreeNode.tree_id == t.id, TreeNode.event_id == getattr(nd, "event_id", None)))
+                            if exists is not None:
+                                continue
+                            tn = TreeNode(tree_id=t.id, event_id=getattr(nd, "event_id", None),
+                                          note_id=getattr(nd, "note_id", "") or "", parent_id=None,
+                                          order=i, confidence=getattr(nd, "confidence", 0.0),
+                                          evidence=json.dumps(getattr(nd, "evidence", []), ensure_ascii=False),
+                                          origin="agent")
+                            session.add(tn)
+                    session.commit()
+                tree_payload = {
+                    "trees": [t.model_dump() for t in merged.trees],
+                    "assignments": [a.model_dump() for a in merged.assignments],
+                    "rejected": [a.model_dump() for a in merged.rejected],
+                    "rejected_reasons": rejected_reasons,
+                    "nodes": tree_nodes,
+                }
+                tree_path = self.io.write(run_id, "tree_rebuild", tree_payload)
+                self.rm.bump_items(run_id, "tree_rebuild", total=len(event_data), done=len(assignments), failed=len(merged.rejected))
+                self.rm.set_stage(run_id, "tree_rebuild", "done", checkpoint_path=str(tree_path))
+
+                # ── status_judge：树级四状态 + 证据 + 断头清单（DESIGN.md 6.2 / FR-5）──
+                self.rm.set_stage(run_id, "status_judge", "running")
+                tree_events: dict[str, list[Any]] = {}
+                for t in merged.trees:
+                    tree_events.setdefault(t.id, [])
+                    for nd in t.nodes:
+                        tree_events[t.id].append(
+                            next((e for e in event_data if e["event_id"] == nd.event_id), {})
+                        )
+                status_result = judge_forest(self.gateway, tree_events)
+                with Session(self.engine) as session:
+                    for j in status_result.judgements:
+                        t = session.get(Tree, j.tree_id)
+                        if t is not None:
+                            t.status = j.status
+                            t.confidence = j.confidence
+                            t.evidence = json.dumps(j.evidence + ([j.rationale] if j.rationale else []), ensure_ascii=False)
+                    session.commit()
+                status_path = save_statuses(self.io, run_id, status_result)
+                self.rm.bump_items(run_id, "status_judge", total=len(tree_events), done=len(status_result.judgements), failed=len(status_result.failures))
+                self.rm.set_stage(run_id, "status_judge", "done", checkpoint_path=str(status_path))
                 self.rm.finish_run(run_id, "done", cost_est=self.gateway.cost)
                 return run_id
         except LLMCostCapExceeded as exc:
