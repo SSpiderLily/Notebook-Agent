@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from src.api.tasks import router as tasks_router
+from src.api.forest import router as forest_router
 from src.api.task_manager import TaskManager
 
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "testserver", "test"}
@@ -63,6 +64,7 @@ def create_app(tasks: TaskManager) -> FastAPI:
     app = FastAPI(title="NoteAgent API", version="0.1.0")
     app.state.tasks = tasks
     app.include_router(tasks_router)
+    app.include_router(forest_router)
     local_only_middleware(app)
 
     @app.exception_handler(RequestValidationError)
