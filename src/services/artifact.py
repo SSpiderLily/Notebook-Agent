@@ -65,3 +65,17 @@ class ArtifactService:
         result = self._write("_noteagent/overview.md", overview)
         result.update({"kind": "overview", "tree_id": None}); results.append(result)
         return {"run_id": run_id, "artifacts": results, "failures": []}
+
+    def generate_selected(self, target_tree: Mapping[str, Any], all_trees: Sequence[Mapping[str, Any]], nodes_by_tree: Mapping[str, Sequence[Mapping[str, Any]]], events: Mapping[int, Mapping[str, Any]], notes: Mapping[str, Mapping[str, Any]], run_id: str) -> dict[str, Any]:
+        """只重生成目标树页，同时刷新依赖全部树的森林总览。"""
+        tid = str(target_tree.get("id", ""))
+        filename = safe_filename(tid) + ".md"
+        tree_result = self._write(
+            f"_noteagent/trees/{filename}",
+            self.renderer.render_tree(target_tree, nodes_by_tree.get(tid, ()), events, notes),
+        )
+        tree_result.update({"kind": "tree_page", "tree_id": tid})
+        links = {str(t.get("id", "")): f"trees/{safe_filename(str(t.get('id', '')))}.md" for t in all_trees}
+        overview_result = self._write("_noteagent/overview.md", self.renderer.render_overview(all_trees, links, run_id))
+        overview_result.update({"kind": "overview", "tree_id": None})
+        return {"run_id": run_id, "artifacts": [tree_result, overview_result], "failures": []}

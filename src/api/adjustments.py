@@ -1,14 +1,17 @@
 """M6 人工修正与重组建议 API。"""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from src.api.schemas import AdjustmentRequest, ReorgRequest
 from src.api.task_manager import TaskManager
-from src.models.orm import Adjustment, Tree
+from src.models.orm import Adjustment, Event, Note, Tree, TreeNode, Artifact
 from src.services.adjustment import AdjustmentError, adjustment_out, apply_adjustment
+from src.services.artifact import ArtifactService
 
 router = APIRouter(prefix="/api", tags=["adjustments"])
 
@@ -48,6 +51,34 @@ def reorg(tree_id: str, body: ReorgRequest, tm: TaskManager = Depends(get_task_m
     except AdjustmentError as exc:
         # reorg 首版只记录显式人工请求，不直接改写树结构，避免未定义 merge/split 语义。
         raise HTTPException(status_code=422, detail={"code": "invalid_reorg", "message": str(exc), "detail": None}) from exc
+
+
+@router.post("/trees/{tree_id}/regenerate")
+def regenerate(tree_id: str, tm: TaskManager = Depends(get_task_manager)):
+    pipeline = tm.pipeline()
+    with Session(pipeline.engine) as session:
+        tree = session.get(Tree, tree_id)
+        if tree is None:
+            raise _not_found("tree_not_found", f"树不存在: {tree_id}")
+        trees = list(session.scalars(select(Tree).order_by(Tree.id)))
+        nodes = list(session.scalars(select(TreeNode)))
+        event_ids = [n.event_id for n in nodes if n.event_id is not None]
+        events = {e.id: {"content": e.content, "time_clue": e.time_clue, "status_clue": e.status_clue} for e in session.scalars(select(Event).where(Event.id.in_(event_ids)))}
+        notes = {n.id: {"path": n.path, "filename": n.filename} for n in session.scalars(select(Note))}
+        tree_dicts = [{"id": t.id, "title": t.title, "status": t.status, "confidence": t.confidence, "evidence": json.loads(t.evidence or "[]"), "narrative": t.narrative} for t in trees]
+        target = next(t for t in tree_dicts if t["id"] == tree_id)
+        nodes_by_tree = {t.id: [] for t in trees}
+        for n in nodes:
+            nodes_by_tree.setdefault(n.tree_id, []).append({"id": n.id, "event_id": n.event_id, "note_id": n.note_id, "order": n.order, "confidence": n.confidence, "evidence": json.loads(n.evidence or "[]")})
+        service = ArtifactService(pipeline.collector.vault, pipeline.db_path.parent / "backups")
+        run_id = pipeline.rm.get_last_run().id if pipeline.rm.get_last_run() else "manual-regenerate"
+        payload = service.generate_selected(target, tree_dicts, nodes_by_tree, events, notes, run_id)
+        for item in payload["artifacts"]:
+            existing = session.scalar(select(Artifact).where(Artifact.path == item["path"], Artifact.content_hash == item["content_hash"]))
+            if existing is None:
+                session.add(Artifact(version=item.get("version", 1), kind=item["kind"], tree_id=item.get("tree_id"), path=item["path"], run_id=run_id, content_hash=item["content_hash"], status="active"))
+        session.commit()
+        return {"tree_id": tree_id, "artifacts": payload["artifacts"], "affected_tree_ids": [tree_id]}
 
 
 @router.get("/adjustments")

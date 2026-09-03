@@ -58,6 +58,15 @@ def test_invalid_move_and_reorg_confirmation(tmp_path):
     assert confirmed.json()["adjustment"]["action"] == "reorg"
 
 
+def test_regenerate_selected_tree_writes_artifacts(tmp_path):
+    tm, client = _client(tmp_path)
+    response = client.post("/api/trees/T-1/regenerate")
+    assert response.status_code == 200
+    assert {item["kind"] for item in response.json()["artifacts"]} == {"tree_page", "overview"}
+    assert (tm.vault_dir / "_noteagent/trees/T-1.md").is_file()
+    assert (tm.vault_dir / "_noteagent/overview.md").is_file()
+
+
 def test_adjustment_get_and_revert(tmp_path):
     _, client = _client(tmp_path)
     created = client.post("/api/trees/T-1/adjust", json={"action": "retitle", "payload": {"title": "版本二"}}).json()["adjustment"]
