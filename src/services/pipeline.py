@@ -30,12 +30,15 @@ from src.models.orm import (
 from src.agents.tree_builder import TreeBuilder
 from src.core.tree_rebuild import DraftForest, DraftTree, TreeAssignment, merge_verified_forest
 from src.core.status import judge_forest, save_statuses
+from src.services.artifact import ArtifactService
+from src.models.orm import Artifact
 
 
 class Pipeline:
     """最小可观测核心链路：采集 → Replay 抽取 → SQLite 持久化 → 关联（Chroma+LLM 判定）。"""
     def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None):
-        self.rm = RunManager(db_path)
+        self.db_path = Path(db_path)
+        self.rm = RunManager(self.db_path)
         self.io = StageIO(runs_dir)
         self.collector = Collector(vault_dir)
         self.gateway = LLMGateway(recordings_dir, mode=mode, transport=transport)
@@ -454,6 +457,35 @@ class Pipeline:
                 status_path = save_statuses(self.io, run_id, status_result)
                 self.rm.bump_items(run_id, "status_judge", total=len(tree_events), done=len(status_result.judgements), failed=len(status_result.failures))
                 self.rm.set_stage(run_id, "status_judge", "done", checkpoint_path=str(status_path))
+
+                # ── artifact：树页与森林总览（M5，确定性模板，不新增 LLM 调用）──
+                self.rm.set_stage(run_id, "artifact", "running")
+                tree_dicts = []
+                nodes_by_tree: dict[str, list[dict[str, Any]]] = {}
+                for t in merged.trees:
+                    tree_dicts.append(t.model_dump())
+                    nodes_by_tree[t.id] = [n.model_dump() for n in t.nodes]
+                event_map = {int(e["event_id"]): e for e in event_data}
+                with Session(self.engine) as session:
+                    note_rows = list(session.scalars(select(Note)).all())
+                note_map = {n.id: {"id": n.id, "path": n.path, "filename": n.filename} for n in note_rows}
+                artifact_service = ArtifactService(
+                    self.collector.vault,
+                    Path(self.db_path).parent / "backups" if hasattr(self, "db_path") else Path(self.rm.db_path).parent / "backups",
+                )
+                artifact_payload = artifact_service.generate(tree_dicts, nodes_by_tree, event_map, note_map, run_id)
+                with Session(self.engine) as session:
+                    for item in artifact_payload["artifacts"]:
+                        existing = session.scalar(select(Artifact).where(Artifact.path == item["path"], Artifact.content_hash == item["content_hash"]))
+                        if existing is not None:
+                            existing.run_id = run_id
+                            continue
+                        session.add(Artifact(version=item.get("version", 1), kind=item["kind"], tree_id=item.get("tree_id"), path=item["path"], run_id=run_id, content_hash=item["content_hash"], status="active"))
+                    session.commit()
+                artifact_path = self.io.write(run_id, "artifact", artifact_payload)
+                artifact_count = len(artifact_payload["artifacts"])
+                self.rm.bump_items(run_id, "artifact", total=artifact_count, done=artifact_count, failed=len(artifact_payload.get("failures", [])))
+                self.rm.set_stage(run_id, "artifact", "done", checkpoint_path=str(artifact_path))
                 self.rm.finish_run(run_id, "done", cost_est=self.gateway.cost)
                 return run_id
         except LLMCostCapExceeded as exc:

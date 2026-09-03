@@ -213,3 +213,33 @@ class TreeNode(Base):
     confidence: Mapped[float] = mapped_column(default=0.0)
     evidence: Mapped[str] = mapped_column(String, default="[]")  # JSON list：挂接依据
     origin: Mapped[str] = mapped_column(String(8), default="agent")  # NODE_ORIGINS
+
+
+class Artifact(Base):
+    """M5 生成的树页/森林总览产物（DESIGN.md 4.1、FR-11）。
+
+    产物本体写入 vault 的 ``_noteagent/`` 目录，本表只保存版本元数据，便于
+    版本查询、幂等重跑和回滚。tree_id 对森林总览为空；同一目标的同一版本
+    只能有一条记录，避免重复生成造成版本歧义。
+    """
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        # 幂等：同一产物目标（类型 + 树）下的版本号唯一。
+        UniqueConstraint("kind", "tree_id", "version", name="uq_artifact_target_version"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    version: Mapped[int] = mapped_column(default=1, index=True)  # 目标内单调递增版本
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # tree_page / overview
+    tree_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("trees.id", ondelete="CASCADE"), index=True, nullable=True
+    )  # 树页关联树；森林总览为空
+    path: Mapped[str] = mapped_column(String(1024), index=True)  # vault 内相对路径
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("runs.id", ondelete="CASCADE"), index=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)  # 内容 SHA-256
+    generated_at: Mapped[str] = mapped_column(String(32), default=now_iso, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)  # 生成失败时的原因
