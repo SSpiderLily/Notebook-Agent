@@ -376,15 +376,33 @@ class Pipeline:
                          "order_in_note": e.order_in_note}
                         for e in session.scalars(select(Event).order_by(Event.id))
                     ]
+                    # 按事件来源笔记建立"关联证据"映射（G1）：M3 已持久化的
+                    # note→note 关联，以只读证据形式交给树 Agent 辅助判定，不触碰原始笔记。
+                    note_meta: dict[str, Note] = {n.id: n for n in session.scalars(select(Note))}
+                    assoc_by_note: dict[str, list[dict[str, Any]]] = {}
+                    for a in session.scalars(select(Association)):
+                        target = note_meta.get(a.dst_id)
+                        assoc_by_note.setdefault(a.src_id, []).append({
+                            "related_note_id": a.dst_id,
+                            "related_note": target.filename if target is not None else a.dst_id,
+                            "basis": json.loads(a.basis or "[]"),
+                            "confidence": a.confidence,
+                            "evidence": json.loads(a.evidence or "[]"),
+                        })
                 builder = TreeBuilder(self.gateway)
+                failures: list[dict[str, Any]] = []
                 for event in event_data:
                     try:
-                        result = builder.run({**event, "associations": []}, verified_tree_ids=verified_tree_ids)
+                        result = builder.run(
+                            {**event, "associations": assoc_by_note.get(event["note_id"], [])},
+                            verified_tree_ids=verified_tree_ids,
+                        )
                         item = result.model_dump() if hasattr(result, "model_dump") else dict(result)
                     except Exception as exc:
-                        # Replay fixtures from pre-M4 runs contain no agent responses.
-                        item = {"tree_id": "NEW", "parent_event_id": None,
-                                "confidence": 0.0, "evidence": f"agent_error: {exc}", "action": "append"}
+                        # G3：Agent 执行失败不降级为"正常新树"，单独进失败清单待人工复核。
+                        # 计数统一在阶段收尾处统计（bump_items failed 为自增），避免重复累计。
+                        failures.append({"event_id": event["event_id"], "note_id": event["note_id"], "error": f"agent_error: {exc}"})
+                        continue
                     item["event_id"] = event["event_id"]
                     item["note_id"] = event["note_id"]
                     assignments.append(item)
@@ -401,8 +419,11 @@ class Pipeline:
                     ]
                 )
                 merged, rejected_reasons = merge_verified_forest(draft, verified_trees)
-                # 持久化草稿/挂接到的树到 trees/tree_nodes（幂等：verified 树不重写）
+                # 持久化草稿/挂接到的树到 trees/tree_nodes（幂等：verified 树不重写）。
+                # G2：先批量插入本批节点取到自增 id，建立 event_id→node_id 映射，
+                # 再按 parent_event_id 回填 parent_id，让树内父子关系真正落库。
                 with Session(self.engine) as session:
+                    event_to_node: dict[int | None, int] = {}
                     for t in merged.trees:
                         if t.id in verified_tree_ids:
                             continue  # 已验证树已存在，不重写、不重组
@@ -415,15 +436,37 @@ class Pipeline:
                             session.add(tree)
                         # 追加节点（同 tree+event 已存在则跳过，保证幂等）
                         for i, nd in enumerate(t.nodes):
-                            exists = session.scalar(select(TreeNode).where(TreeNode.tree_id == t.id, TreeNode.event_id == getattr(nd, "event_id", None)))
+                            eid = getattr(nd, "event_id", None)
+                            exists = session.scalar(select(TreeNode).where(TreeNode.tree_id == t.id, TreeNode.event_id == eid))
                             if exists is not None:
+                                event_to_node.setdefault(eid, exists.id)
                                 continue
-                            tn = TreeNode(tree_id=t.id, event_id=getattr(nd, "event_id", None),
+                            tn = TreeNode(tree_id=t.id, event_id=eid,
                                           note_id=getattr(nd, "note_id", "") or "", parent_id=None,
                                           order=i, confidence=getattr(nd, "confidence", 0.0),
                                           evidence=json.dumps(getattr(nd, "evidence", []), ensure_ascii=False),
                                           origin="agent")
                             session.add(tn)
+                            session.flush()  # 取自增 id，供回填父节点
+                            event_to_node.setdefault(eid, tn.id)
+                    # 回填父节点：父事件不在本批（历史 Run 已落库）时回查同树 event_id。
+                    for t in merged.trees:
+                        if t.id in verified_tree_ids:
+                            continue
+                        for nd in t.nodes:
+                            eid = getattr(nd, "event_id", None)
+                            peid = getattr(nd, "parent_event_id", None)
+                            if eid is None or peid is None:
+                                continue
+                            pid = event_to_node.get(peid)
+                            if pid is None:
+                                par = session.scalar(select(TreeNode).where(TreeNode.tree_id == t.id, TreeNode.event_id == peid))
+                                if par is not None:
+                                    pid = par.id
+                            if pid is not None:
+                                node = session.get(TreeNode, event_to_node[eid])
+                                if node is not None:
+                                    node.parent_id = pid
                     session.commit()
                 tree_payload = {
                     "trees": [t.model_dump() for t in merged.trees],
@@ -431,9 +474,10 @@ class Pipeline:
                     "rejected": [a.model_dump() for a in merged.rejected],
                     "rejected_reasons": rejected_reasons,
                     "nodes": tree_nodes,
+                    "failures": failures,
                 }
                 tree_path = self.io.write(run_id, "tree_rebuild", tree_payload)
-                self.rm.bump_items(run_id, "tree_rebuild", total=len(event_data), done=len(assignments), failed=len(merged.rejected))
+                self.rm.bump_items(run_id, "tree_rebuild", total=len(event_data), done=len(assignments), failed=len(merged.rejected) + len(failures))
                 self.rm.set_stage(run_id, "tree_rebuild", "done", checkpoint_path=str(tree_path))
 
                 # ── status_judge：树级四状态 + 证据 + 断头清单（DESIGN.md 6.2 / FR-5）──
