@@ -243,3 +243,21 @@ class Artifact(Base):
     generated_at: Mapped[str] = mapped_column(String(32), default=now_iso, index=True)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)  # 生成失败时的原因
+
+
+class Adjustment(Base):
+    """Web 人工修正记录（M6）；记录 before/after 以支持审计与撤销。"""
+
+    __tablename__ = "adjustments"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    target_type: Mapped[str] = mapped_column(String(32), default="tree")
+    target_id: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(32), index=True)
+    payload_json: Mapped[str] = mapped_column(String, default="{}")
+    before_json: Mapped[str] = mapped_column(String, default="{}")
+    after_json: Mapped[str] = mapped_column(String, default="{}")
+    status: Mapped[str] = mapped_column(String(16), default="applied", index=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=now_iso)
+    applied_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)

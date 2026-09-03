@@ -52,6 +52,16 @@ class PreviewOut(BaseModel):
     estimated_minutes: float = 0.0
 
 
+class AdjustmentRequest(BaseModel):
+    action: str
+    payload: dict = Field(default_factory=dict)
+
+
+class ReorgRequest(BaseModel):
+    confirm: bool = False
+    payload: dict = Field(default_factory=dict)
+
+
 class SSEEvent(BaseModel):
     """SSE 进度事件负载。"""
 
