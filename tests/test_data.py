@@ -59,6 +59,28 @@ def test_note_loader():
         print(f"内容长度: {len(raw_data['content'])} 字符")
 
 
+def test_note_parser_date_metadata_json_safe():
+    """回归：frontmatter 中的日期应归一化为字符串，保证采集快照可 json.dumps。"""
+    import json
+    content = """---
+title: 测试
+created: 2026-03-02
+nested:
+  updated: 2026-03-05 10:00:00
+tags: [a]
+---
+
+# 正文
+"""
+    metadata = NoteParser().parse_metadata(content)
+    assert isinstance(metadata["created"], str)
+    assert metadata["created"] == "2026-03-02"
+    assert isinstance(metadata["nested"]["updated"], str)
+    # 整棵元数据必须可 JSON 序列化（采集快照依赖此特性）
+    json.dumps({"notes": {"a.md": {"metadata": metadata}}})
+    assert metadata["tags"] == ["a"]
+
+
 def test_note_parser():
     """测试NoteParser解析器"""
     print("\n=== 测试NoteParser解析器 ===")

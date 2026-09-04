@@ -1,12 +1,32 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import yaml
 
 from .models import Note
+
+
+def _json_safe(value: Any) -> Any:
+    """把 YAML 解析出的非 JSON 安全标量归一化，保证采集快照可序列化。
+
+    yaml.safe_load 会把 `created: 2026-03-02` 解析成 date 对象，直接写入快照会
+    导致 json.dumps 失败。这里递归转换：date/datetime → ISO 字符串，其余不可
+    序列化对象 → 字符串。
+    """
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 class NoteParser:
@@ -29,7 +49,7 @@ class NoteParser:
             raise ValueError(f"frontmatter YAML 无效: {exc}") from exc
         if not isinstance(value, dict):
             raise ValueError("frontmatter 必须是 YAML 对象")
-        return value
+        return _json_safe(value)
 
     def parse_title(self, content: str) -> str:
         match = self._heading.search(self._without_code(self._fm.sub("", content, count=1)))

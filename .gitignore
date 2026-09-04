@@ -26,6 +26,9 @@ env/
 ENV/
 .venv/
 
+# Node / 前端依赖
+node_modules/
+
 # IDE
 .idea/
 .vscode/
@@ -35,6 +38,8 @@ ENV/
 # Data（运行时产物整体忽略：SQLite/Chroma/运行记录/LLM录制/备份，见 DESIGN.md 4.3）
 /data/
 notebooks/*.db
+# vault 内生成物专用目录（FR-6）：产物页不进仓库
+notebooks/_noteagent/
 
 # Logs
 *.log

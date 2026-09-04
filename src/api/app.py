@@ -8,11 +8,14 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from loguru import logger
 
 from src.api.tasks import router as tasks_router
 from src.api.forest import router as forest_router
@@ -62,7 +65,7 @@ def local_only_middleware(app: FastAPI):
     return app
 
 
-def create_app(tasks: TaskManager) -> FastAPI:
+def create_app(tasks: TaskManager, frontend_dist: Path | None = None) -> FastAPI:
     app = FastAPI(title="NoteAgent API", version="0.1.0")
     app.state.tasks = tasks
     app.include_router(tasks_router)
@@ -104,5 +107,16 @@ def create_app(tasks: TaskManager) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
+
+    # 静态托管前端构建产物（DESIGN.md 2.1/3.3）：与 API 同源托管 SPA，前端用相对
+    # 路径调 /api/*，避免跨源 Origin 违反本机护栏。必须挂在全部 API 路由之后再注册，
+    # 让 /api/* 保持优先级；目录缺失时仅提供 API 并告警，不阻断服务。
+    if frontend_dist is None:
+        from src.infra.config import get_settings as _get_settings
+        frontend_dist = _get_settings().frontend_dist
+    if Path(frontend_dist).is_dir():
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+    else:
+        logger.warning(f"未找到前端构建产物 {frontend_dist}，仅提供 API（开发期请先 npm run build）")
 
     return app

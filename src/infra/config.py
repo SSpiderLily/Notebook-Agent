@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     logs_dir: Path = Path("./logs")
     artifacts_dirname: str = "_noteagent"  # vault 内生成物专用目录（FR-6）
+    frontend_dist: Path = Path("./frontend/dist")  # 前端构建产物目录（DESIGN.md 3.3 静态托管）
 
     # ── 采集排除与忽略（DESIGN.md 4.4，优先级 frontmatter > glob > 目录）──
     exclude_dirs: list[str] = [
