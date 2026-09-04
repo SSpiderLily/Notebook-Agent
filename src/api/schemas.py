@@ -62,6 +62,25 @@ class ReorgRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class WritebackPreviewRequest(BaseModel):
+    """POST /api/writeback/preview：kind = tags | links，note_ids 可选筛选。"""
+
+    kind: str
+    note_ids: list[str] | None = Field(default=None)
+
+
+class WritebackConfirmRequest(BaseModel):
+    """POST /api/writeback/jobs/{id}/confirm（破坏性，需 confirm=true）。"""
+
+    confirm: bool = False
+
+
+class BackupRestoreRequest(BaseModel):
+    """POST /api/writeback/backups/{id}/restore（破坏性，需 confirm=true）。"""
+
+    confirm: bool = False
+
+
 class SSEEvent(BaseModel):
     """SSE 进度事件负载。"""
 

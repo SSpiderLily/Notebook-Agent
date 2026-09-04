@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from src.api.tasks import router as tasks_router
 from src.api.forest import router as forest_router
 from src.api.adjustments import router as adjustments_router
+from src.api.writeback import router as writeback_router
 from src.api.task_manager import TaskManager
 
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "testserver", "test"}
@@ -67,6 +68,7 @@ def create_app(tasks: TaskManager) -> FastAPI:
     app.include_router(tasks_router)
     app.include_router(forest_router)
     app.include_router(adjustments_router)
+    app.include_router(writeback_router)
     local_only_middleware(app)
 
     @app.exception_handler(RequestValidationError)

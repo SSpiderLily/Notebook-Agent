@@ -261,3 +261,46 @@ class Adjustment(Base):
     created_at: Mapped[str] = mapped_column(String(32), default=now_iso)
     applied_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class WritebackJob(Base):
+    """双写回任务（DESIGN.md 4.1 writeback_jobs，FR-10）。
+
+    kind = tags/links；status 覆盖预览→部分应用→全部应用/失败，供 Web 确认工作台展示。
+    每次 preview 生成一个新 job，不覆盖历史，便于回看某次写回的 diff。
+    """
+
+    __tablename__ = "writeback_jobs"
+
+    WRITEBACK_KINDS = ("tags", "links")
+    WRITEBACK_STATUSES = ("previewed", "applied", "partially_applied", "failed")
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # tags / links
+    status: Mapped[str] = mapped_column(String(24), default="previewed", index=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=now_iso, index=True)
+    applied_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class WritebackItem(Base):
+    """双写回单篇笔记条目（DESIGN.md 4.1 writeback_items，FR-10）。
+
+    diff_text 保留预览时的 unified diff；preview_hash 绑定当时文件内容（配合 SafeWriter
+    的 preview_hash/apply 令牌机制，检测确认前外部变更）；applied 标记幂等应用结果。
+    """
+
+    __tablename__ = "writeback_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("writeback_jobs.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), default="tags")
+    note_id: Mapped[str] = mapped_column(String(64), index=True)
+    path: Mapped[str] = mapped_column(String(512), index=True)  # vault 内相对路径
+    content: Mapped[str] = mapped_column(String, default="")  # 预览确定的写回后内容
+    diff_text: Mapped[str] = mapped_column(String, default="")  # unified diff
+    preview_hash: Mapped[str] = mapped_column(String(64), default="")  # 绑定当时内容的令牌
+    applied: Mapped[bool] = mapped_column(default=False)
+    error: Mapped[str | None] = mapped_column(String, nullable=True)
