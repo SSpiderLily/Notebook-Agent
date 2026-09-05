@@ -21,6 +21,7 @@ const route = useRoute()
         <el-menu-item index="/workbench">确认工作台</el-menu-item>
         <el-menu-item index="/writeback">双写回</el-menu-item>
         <el-menu-item index="/tasks">任务</el-menu-item>
+        <el-menu-item index="/chat">问答</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

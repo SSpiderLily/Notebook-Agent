@@ -81,6 +81,18 @@ class BackupRestoreRequest(BaseModel):
     confirm: bool = False
 
 
+class ChatSessionRequest(BaseModel):
+    title: str = "新会话"
+
+
+class ChatMessageRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=20000)
+
+
+class ChatClearRequest(BaseModel):
+    confirm: bool = False
+
+
 class SSEEvent(BaseModel):
     """SSE 进度事件负载。"""
 

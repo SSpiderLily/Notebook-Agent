@@ -58,6 +58,25 @@ class Base(DeclarativeBase):
     pass
 
 
+class ChatSession(Base):
+    __tablename__ = "sessions"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), default="新会话")
+    summary: Mapped[str] = mapped_column(String, default="")
+    created_at: Mapped[str] = mapped_column(String(32), default=now_iso)
+    updated_at: Mapped[str] = mapped_column(String(32), default=now_iso)
+
+
+class ChatMessage(Base):
+    __tablename__ = "messages"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(String)
+    citations: Mapped[str] = mapped_column(String, default="[]")
+    created_at: Mapped[str] = mapped_column(String(32), default=now_iso)
+
+
 class Run(Base):
     """一次整理任务（DESIGN.md 3.1）。running 状态行兼作互斥锁。"""
 
