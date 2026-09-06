@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -36,7 +37,7 @@ from src.models.orm import Artifact
 
 class Pipeline:
     """最小可观测核心链路：采集 → Replay 抽取 → SQLite 持久化 → 关联（Chroma+LLM 判定）。"""
-    def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None, model: str | None = None, api_base: str | None = None, api_key: str | None = None):
+    def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None, model: str | None = None, api_base: str | None = None, api_key: str | None = None, llm_concurrency: int = 1):
         self.db_path = Path(db_path)
         self.rm = RunManager(self.db_path)
         self.io = StageIO(runs_dir)
@@ -44,6 +45,9 @@ class Pipeline:
         # 真实调用（mode=record）时 gateway 必须拿到正确 model/api_base/api_key，
         # 否则会用默认 model="test" 连不上任何模型；这些由入口层（main.py）显式传入。
         self.gateway = LLMGateway(recordings_dir, mode=mode, model=model or "test", transport=transport, api_base=api_base, api_key=api_key)
+        # LLM 判定环节并发度：<=1 保持顺序（测试/确定性场景），>1 用线程池并发真实调用。
+        # gateway 已在内部加锁保护成本/台账，并发安全。
+        self.llm_concurrency = llm_concurrency
         self.snapshot_path = Path(runs_dir).parent / "collection_snapshot.json"
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         self.chroma_path = Path(chroma_path) if chroma_path is not None else Path(db_path).parent / "chroma"
@@ -322,11 +326,24 @@ class Pipeline:
                 call_start = len(self.gateway.calls)
                 # 失败隔离：单个候选判定失败不中断整个阶段
                 judgements, failed = [], []
-                for cand in candidates:
-                    try:
-                        judgements.append(judge_candidates(self.gateway, [cand])[0])
-                    except Exception as exc:
-                        failed.append({"source_id": cand.source_id, "target_id": cand.target_id, "error": str(exc)})
+                if self.llm_concurrency <= 1:
+                    # 顺序判定（确定性场景/测试）
+                    for cand in candidates:
+                        try:
+                            judgements.append(judge_candidates(self.gateway, [cand])[0])
+                        except Exception as exc:
+                            failed.append({"source_id": cand.source_id, "target_id": cand.target_id, "error": str(exc)})
+                else:
+                    # 并发判定：真实调用耗时在网络往返，线程池并行；gateway 内部已加锁保护成本/台账。
+                    # 用 ex.map 保持返回顺序与 candidates 一致，judgements/failed 结果可复现。
+                    def _judge(cand):
+                        try:
+                            return ("ok", judge_candidates(self.gateway, [cand])[0])
+                        except Exception as exc:
+                            return ("err", {"source_id": cand.source_id, "target_id": cand.target_id, "error": str(exc)})
+                    with ThreadPoolExecutor(max_workers=self.llm_concurrency, thread_name_prefix="assoc") as ex:
+                        for status, val in ex.map(_judge, candidates):
+                            (judgements if status == "ok" else failed).append(val)
                 with Session(self.engine) as session:
                     for call in self.gateway.calls[call_start:]:
                         session.add(LLMCall(run_id=run_id, stage="associate", caller="association_judger", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))

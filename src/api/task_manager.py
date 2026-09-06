@@ -27,6 +27,7 @@ class TaskManager:
         model: str | None = None,
         api_base: str | None = None,
         api_key: str | None = None,
+        llm_concurrency: int = 1,
     ) -> None:
         self.vault_dir = Path(vault_dir)
         self.db_path = Path(db_path)
@@ -37,6 +38,7 @@ class TaskManager:
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
+        self.llm_concurrency = llm_concurrency
         self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
         self._pipeline: Pipeline | None = None
@@ -54,6 +56,7 @@ class TaskManager:
                 model=self.model,
                 api_base=self.api_base,
                 api_key=self.api_key,
+                llm_concurrency=self.llm_concurrency,
             )
         return self._pipeline
 

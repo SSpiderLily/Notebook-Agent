@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
@@ -27,15 +28,18 @@ class LLMGateway:
         self.cost = 0.0
         self.calls: list[dict[str, Any]] = []
         self.max_retries = 2
+        # 并发判定时成本/台账是共享状态，所有读改写须在锁内，避免丢账或成本上限穿透
+        self._call_lock = threading.Lock()
 
-    def _record_usage(self, key: str, prompt: str, response: str, retries: int = 0) -> None:
+    def _record_usage(self, key: str, prompt: str, response: str, retries: int = 0, latency_ms: float = 0.0) -> None:
         prompt_tokens = max(1, len(prompt) // 4)
         completion_tokens = max(1, len(response) // 4)
         cost_est = (prompt_tokens * 2.0 + completion_tokens * 8.0) / 1_000_000
-        if self.cost + cost_est > self.cost_cap:
-            raise LLMCostCapExceeded("已超过 Run 成本上限")
-        self.cost += cost_est
-        self.calls.append({"digest": key, "model": self.model, "mode": self.mode, "status": "ok", "retries": retries, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "cost_est": cost_est})
+        with self._call_lock:
+            if self.cost + cost_est > self.cost_cap:
+                raise LLMCostCapExceeded("已超过 Run 成本上限")
+            self.cost += cost_est
+            self.calls.append({"digest": key, "model": self.model, "mode": self.mode, "status": "ok", "retries": retries, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "cost_est": cost_est, "latency_ms": latency_ms})
 
     def _key(self, prompt: str, schema: Any = None) -> str:
         name = getattr(schema, "__name__", "text")
@@ -64,6 +68,7 @@ class LLMGateway:
         else:
             transport = self.transport
         response = None
+        attempt = 0
         started = time.monotonic()
         for attempt in range(self.max_retries + 1):
             try:
@@ -71,15 +76,16 @@ class LLMGateway:
                 break
             except Exception:
                 if attempt >= self.max_retries:
-                    self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "failed", "retries": attempt})
+                    with self._call_lock:
+                        self.calls.append({"digest": key, "model": self.model, "mode": "record", "status": "failed", "retries": attempt})
                     raise
                 time.sleep(0.05 * (2 ** attempt))
         if not isinstance(response, str):
             response = response.choices[0].message.content
+        latency_ms = round((time.monotonic() - started) * 1000, 2)
         self.root.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"prompt": prompt, "response": response}, ensure_ascii=False), encoding="utf-8")
-        self._record_usage(key, prompt, response, attempt)
-        self.calls[-1]["latency_ms"] = round((time.monotonic() - started) * 1000, 2)
+        self._record_usage(key, prompt, response, attempt, latency_ms)
         return response
 
     def structured(self, prompt: str, schema: type[T]) -> T:

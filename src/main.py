@@ -26,6 +26,7 @@ def main() -> None:
         model=settings.model_name,
         api_base=settings.openai_base_url,
         api_key=settings.openai_api_key or None,
+        llm_concurrency=settings.llm_concurrency,
     )
     app = create_app(tm)
 
