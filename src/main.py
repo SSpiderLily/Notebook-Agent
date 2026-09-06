@@ -23,6 +23,9 @@ def main() -> None:
         recordings_dir=settings.llm_recordings_dir,
         mode=settings.llm_mode,
         transport=None,
+        model=settings.model_name,
+        api_base=settings.openai_base_url,
+        api_key=settings.openai_api_key or None,
     )
     app = create_app(tm)
 

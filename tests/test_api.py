@@ -12,14 +12,14 @@ from fastapi.testclient import TestClient
 
 from src.api.app import create_app
 from src.api.task_manager import TaskManager
-from src.core.extraction import ExtractionDraft
+from src.core.extraction import ExtractionDraft, build_extraction_prompt
 from src.infra.llm_gateway import LLMGateway
 from src.infra.run_manager import RunAlreadyActiveError
 
 
 def _make_recording(recordings, note, model="test"):
     """用真实 structured 指纹生成抽取回放，保证 replay 命中 schema 名的键。"""
-    prompt = f"请提炼以下笔记为 JSON（title, summary, keywords, candidate_tags, events）；笔记路径：{note['relative_path']}\n{note['content']}"
+    prompt = build_extraction_prompt(note["relative_path"], note["content"])
     gw = LLMGateway(recordings, mode="record", model=model, transport=lambda _: json.dumps(
         {"title": "A", "summary": "推进项目", "keywords": [], "candidate_tags": [],
          "events": [{"content": "推进项目", "order_in_note": 0}]}

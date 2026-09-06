@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from src.services.pipeline import Pipeline
 from src.data.collection import Collector
 from src.infra.llm_gateway import LLMGateway
+from src.core.extraction import build_extraction_prompt
 from src.models.orm import Extraction, Event
 from sqlalchemy import select
 
@@ -12,7 +13,7 @@ def test_minimal_pipeline_is_observable_and_executable(tmp_path):
     vault = tmp_path / "vault"; vault.mkdir()
     (vault / "a.md").write_text("# A\n推进项目", encoding="utf-8")
     note = Collector(vault).collect()[0]
-    prompt = f"请提炼以下笔记为 JSON（title, summary, keywords, candidate_tags, events）；笔记路径：{note['relative_path']}\n{note['content']}"
+    prompt = build_extraction_prompt(note["relative_path"], note["content"])
     recordings = tmp_path / "recordings"
     LLMGateway(recordings, mode="record", transport=lambda _: json.dumps({"title":"A","summary":"推进项目","keywords":[],"candidate_tags":[],"events":[{"content":"推进项目","order_in_note":0}]})).chat(prompt)
     pipeline = Pipeline(vault, tmp_path / "db.sqlite", tmp_path / "runs", recordings)

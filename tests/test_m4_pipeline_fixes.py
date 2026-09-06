@@ -56,7 +56,7 @@ def _transport():
     - status  → 判定为 in_progress
     """
     def transport(prompt: str) -> str:
-        if "提炼以下笔记" in prompt:
+        if "提炼为结构化 JSON" in prompt:
             return json.dumps({
                 "title": "项目",
                 "summary": "推进项目",

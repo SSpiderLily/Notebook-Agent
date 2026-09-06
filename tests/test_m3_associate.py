@@ -49,7 +49,7 @@ class _Transport:
     """可复用的 record 传输：区分抽取 prompt 与关联判定 prompt。"""
 
     def __call__(self, prompt: str) -> str:
-        if "请判断以下候选" in prompt:
+        if "是否存在实质关联" in prompt:
             cand = json.loads(prompt.split("\n")[-1])
             return json.dumps({"source_id": cand["source_id"], "target_id": cand["target_id"], "related": True, "confidence": 0.9, "evidence": cand["evidence"], "rationale": "同文件夹"})
         return json.dumps({"title": "项目", "summary": "推进项目", "keywords": ["项目"], "candidate_tags": [], "events": [{"content": "推进项目", "order_in_note": 0}]})

@@ -156,3 +156,40 @@ def test_append_only_end_to_end_via_merge():
     assert any(nd.event_id == 10 for t in merged.trees for nd in t.nodes), "合法追加应生效"
     assert any(a.event_id == 11 for a in merged.rejected), "非法重组应进人工复核队列"
     assert reasons, "应给出拒绝原因"
+
+def test_parse_gateway_response_tolerates_real_provider_formats():
+    """回归：真实 Provider 会以 {args JSON} to=工具 json 混排 / XML <tool_call> 块输出工具调用，
+    _parse_gateway_response 必须把这些识别为工具调用而非纯文本（否则 Agent 无法推进）。
+    """
+    from src.agents.tree_builder import _parse_gateway_response
+
+    # {args JSON} to=工具 json 混排（真实 Provider 常见）
+    prose = '{"query": "跑步 计划"} to=search_candidate_trees json'
+    msg = _parse_gateway_response(prose, "c1")
+    assert msg.content == ""
+    assert msg.tool_calls, "to= 混排文本应识别为工具调用而非纯文本"
+    assert msg.tool_calls[0]["name"] == "search_candidate_trees"
+    assert msg.tool_calls[0]["args"] == {"query": "跑步 计划"}
+
+    # XML <tool_call> 块（<tool_name> + <parameters>{json}</parameters>）
+    xml = (
+        "<tool_call><tool_name>search_candidate_trees</tool_name>"
+        '<parameters>{"query": "跑步 计划"}</parameters></tool_call>'
+    )
+    msg = _parse_gateway_response(xml, "c2")
+    assert msg.tool_calls, "XML tool_call 块应识别为工具调用而非纯文本"
+    assert msg.tool_calls[0]["name"] == "search_candidate_trees"
+    assert msg.tool_calls[0]["args"] == {"query": "跑步 计划"}
+
+    # DSML 标签风格（glm 系 Provider 常见，前后各带一个管道符）
+    dsml = (
+        "<|DSML|tool_calls>\n"
+        "<|DSML|invoke name=\"search_candidate_trees\">\n"
+        "<|DSML|parameter name=\"query\">跑步 计划</|DSML|parameter>\n"
+        "</|DSML|invoke>\n"
+        "</|DSML|tool_calls>"
+    )
+    msg = _parse_gateway_response(dsml, "c3")
+    assert msg.tool_calls, "DSML 标签应识别为工具调用而非纯文本"
+    assert msg.tool_calls[0]["name"] == "search_candidate_trees"
+    assert msg.tool_calls[0]["args"] == {"query": "跑步 计划"}

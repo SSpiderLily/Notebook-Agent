@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any, Mapping, Sequence
 
 from langchain.agents import create_agent
@@ -18,7 +19,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from src.agents.tools import build_tools
+from src.agents.tools import TOOL_NAMES, build_tools
 from src.core.tree_rebuild import TreeAssignment
 
 # 工具白名单（与 DESIGN.md 6.1 一致），硬编码在 tools.py
@@ -34,8 +35,9 @@ def _parse_gateway_response(raw: Any, call_id: str) -> AIMessage:
 
     协议：
     - `{"tool": "...", "args": {...}}` → 工具调用 AIMessage（触发 ReAct 下一轮）；
-    - 其他内容 → 纯文本 AIMessage（作为最终判定，触发 Agent 结束）。
-    兼容 OpenAI 风格 `{"tool_calls": [...]}` 与 json 围栏。
+    - `{"tool_calls": [...]}` → 多工具调用；
+    - 真实 Provider 常自由输出 `{args JSON} to=工具 json` 混排、DSML `<DSML>invoke`/`<|DSML|>`、
+      XML `<toolcall>` 块，统一容错提取；JSON 可解析但无法识别为工具调用时按终态纯文本处理。
     """
     if isinstance(raw, str):
         normalized = raw.strip()
@@ -55,6 +57,12 @@ def _parse_gateway_response(raw: Any, call_id: str) -> AIMessage:
             name = str(data["tool"])
             args = data.get("args") or {}
             return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
+    if isinstance(raw, str):
+        text = raw.strip()
+        # DSML / sklearn 风格 `<DSML>invoke name="..."` / `<tool_call>` / `<toolcall>` XML 块
+        calls = _extract_xml_tool_calls(text) or _extract_prose_tool_calls(text)
+        if calls:
+            return AIMessage(content="", tool_calls=[{"name": n, "args": a, "id": f"{call_id}-{i}"} for i, (n, a) in enumerate(calls)])
     return AIMessage(content=raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False))
 
 
@@ -65,6 +73,55 @@ def _norm_tool_call(tc: Mapping[str, Any]) -> dict[str, Any]:
         args = json.loads(args) if isinstance(args, str) else args
         return {"name": name, "args": args, "id": tc.get("id", "")}
     return {"name": name, "args": tc.get("args", {}), "id": tc.get("id", "c0")}
+
+
+def _extract_xml_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """从 XML/DSML 风格的 tool_call 块里提取 (工具名, args)。"""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    # DSML 风格（glm 系 Provider 前后常各带一个管道符）：<|DSML|invoke name="tool">、<|DSML|parameter>...</parameter>
+    # dsml 令牌：兼容 <DSML|、<|DSML|、<|DSML> 等带/不带管道符的写法
+    dsml = r"(?:[|｜]?\s*DSML\s*[|｜]?)"
+    invokes = re.findall(rf"<{dsml}\s*invoke\s+name\s*=\s*[\"']([^\"']+)[\"']", text, re.I)
+    params = re.findall(rf"<{dsml}\s*parameter\b[^>]*>([\s\S]*?)</{dsml}\s*parameter\s*>", text, re.I)
+    if invokes:
+        for i, name in enumerate(invokes):
+            arg = params[i] if i < len(params) else ""
+            calls.append((name, _parse_tool_args(name, arg)))
+    if calls:
+        return calls
+    # XML 风格：<toolcall>/<tool_call>/<toolcall><tool_name>...<parameters>{json}</parameters>
+    blocks = re.findall(r'<tool(?:call|_call)[^>]*>([\s\S]*?)</tool(?:call|_call)>', text, re.I)
+    for block in blocks:
+        name = re.search(r'<tool_name>\s*([^<]+?)\s*</tool_name>', block, re.I)
+        params = re.search(r'<parameters>\s*([\s\S]*?)\s*</parameters>', block, re.I)
+        n = name.group(1).strip() if name else ""
+        if n:
+            calls.append((n, _parse_tool_args(n, params.group(1) if params else "{}")))
+    return calls
+
+
+def _extract_prose_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """从 `{args JSON} to=工具 json` 混排文本里提取工具调用（真实 Provider 常见）。"""
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for m in re.finditer(r'(\{.*?\})\s*(?:to=)?\s*([a-z_]+)\s*(?:json|code)?', text, re.I):
+        try:
+            args = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        name = m.group(2)
+        if name in TOOL_NAMES and isinstance(args, dict):
+            calls.append((name, args))
+    return calls
+
+
+def _parse_tool_args(name: str, raw: str) -> dict[str, Any]:
+    """把工具调用的参数串解析为 dict：优先 JSON，退化为去引号单值。"""
+    raw = raw.strip()
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else {name.replace("search_", ""): v}
+    except json.JSONDecodeError:
+        return {"query": raw} if "search" in name else {}
 
 
 class GatewayChatModel(BaseChatModel):
@@ -102,7 +159,19 @@ class GatewayChatModel(BaseChatModel):
             for m in messages
         )
         sys_text = getattr(self.system_prompt, "content", "") or "你是树重建 Agent。"
-        prompt = f"【系统】{sys_text}\n【可用工具】\n{tools_desc}\n【消息历史】\n{history}"
+        # 明确约束输出协议：要调用工具时只输出严格 JSON，禁止 DSML/XML/Markdown 围栏/自由文本混排，
+        # 与 _parse_gateway_response 的解析协议保持一致（真实 Provider 会自由发挥成各类格式导致解析失败）。
+        protocol = (
+            "\n【输出协议（必须严格遵守）】\n"
+            "每一步只输出一个 JSON 对象，禁止输出任何其他内容（不要 DSML 标签、不要 XML、"
+            "不要 Markdown 围栏、不要解释性文字、不要 `to=工具` 混排文本）。\n"
+            "要调用工具时输出：{\"tool\": \"工具名\", \"args\": {...}}\n"
+            "若要一次调用多个工具，输出：{\"tool_calls\": [{\"tool\": \"工具名\", \"args\": {...}}, ...]}\n"
+            "完成考量、提交终态时输出 TreeAssignment JSON："
+            "{\"tree_id\": \"目标树ID或NEW\", \"parent_event_id\": null, \"confidence\": 0~1, "
+            "\"evidence\": \"依据\", \"action\": \"append\"}\n"
+        )
+        prompt = f"【系统】{sys_text}\n{protocol}\n【可用工具】\n{tools_desc}\n【消息历史】\n{history}"
         raw = self.gateway.chat(prompt)
         return ChatResult(
             generations=[ChatGeneration(message=_parse_gateway_response(raw, call_id=f"c{len(self.gateway.calls)}"))]

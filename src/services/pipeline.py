@@ -36,12 +36,14 @@ from src.models.orm import Artifact
 
 class Pipeline:
     """最小可观测核心链路：采集 → Replay 抽取 → SQLite 持久化 → 关联（Chroma+LLM 判定）。"""
-    def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None):
+    def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None, model: str | None = None, api_base: str | None = None, api_key: str | None = None):
         self.db_path = Path(db_path)
         self.rm = RunManager(self.db_path)
         self.io = StageIO(runs_dir)
         self.collector = Collector(vault_dir)
-        self.gateway = LLMGateway(recordings_dir, mode=mode, transport=transport)
+        # 真实调用（mode=record）时 gateway 必须拿到正确 model/api_base/api_key，
+        # 否则会用默认 model="test" 连不上任何模型；这些由入口层（main.py）显式传入。
+        self.gateway = LLMGateway(recordings_dir, mode=mode, model=model or "test", transport=transport, api_base=api_base, api_key=api_key)
         self.snapshot_path = Path(runs_dir).parent / "collection_snapshot.json"
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         self.chroma_path = Path(chroma_path) if chroma_path is not None else Path(db_path).parent / "chroma"

@@ -58,10 +58,23 @@ def generate_candidates(notes: list[Any], vector_store: Any = None, *, k: int = 
     return list(result.values())
 
 
+def build_association_prompt(candidate: AssociationCandidate) -> str:
+    """构造关联判定提示词，明确规定输出 JSON 的字段（与 AssociationJudgement schema 一致）。"""
+    return (
+        "判断下面两条笔记是否存在实质关联（同一任务/想法/事件的后续推进，或主题强相关）。\n"
+        "只输出一个 JSON 对象，不要额外解释、不要 Markdown 围栏。字段：\n"
+        "source_id（字符串：原样返回给定值）、target_id（字符串：原样返回给定值）、\n"
+        "related（布尔：是否关联）、confidence（0~1 数字）、\n"
+        "evidence（字符串数组：判定依据）、rationale（字符串：一句理由）。\n"
+        "候选输入（source_id/target_id 必须原样回填）：\n"
+        + candidate.model_dump_json()
+    )
+
+
 def judge_candidates(gateway: Any, candidates: list[AssociationCandidate]) -> list[AssociationJudgement]:
     judged = []
     for candidate in candidates:
-        prompt = "请判断以下候选笔记是否存在关联，仅输出符合 schema 的 JSON：\n" + candidate.model_dump_json()
+        prompt = build_association_prompt(candidate)
         value = gateway.structured(prompt, AssociationJudgement)
         if value.source_id != candidate.source_id or value.target_id != candidate.target_id:
             raise ValueError("LLM 判定 ID 与候选不一致")

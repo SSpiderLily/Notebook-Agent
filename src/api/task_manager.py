@@ -24,6 +24,9 @@ class TaskManager:
         *,
         mode: str = "replay",
         transport=None,
+        model: str | None = None,
+        api_base: str | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.vault_dir = Path(vault_dir)
         self.db_path = Path(db_path)
@@ -31,6 +34,9 @@ class TaskManager:
         self.recordings_dir = Path(recordings_dir)
         self.mode = mode
         self.transport = transport
+        self.model = model
+        self.api_base = api_base
+        self.api_key = api_key
         self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
         self._pipeline: Pipeline | None = None
@@ -45,6 +51,9 @@ class TaskManager:
                 self.recordings_dir,
                 mode=self.mode,
                 transport=self.transport,
+                model=self.model,
+                api_base=self.api_base,
+                api_key=self.api_key,
             )
         return self._pipeline
 
