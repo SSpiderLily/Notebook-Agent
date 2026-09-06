@@ -59,3 +59,5 @@ dev-log/.obsidian/
 
 # macOS
 .DS_Store
+# 验收用真实保险库副本（用户个人数据，不提交）
+real-vault/
