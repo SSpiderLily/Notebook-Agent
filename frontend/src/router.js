@@ -4,6 +4,7 @@ import ForestView from './views/ForestView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
 import WritebackView from './views/WritebackView.vue'
 import ChatView from './views/ChatView.vue'
+import ObserveView from './views/ObserveView.vue'
 
 // 用 hash 模式路由：同端口静态托管时无需服务端 SPA fallback（DESIGN.md 3.3）。
 export const router = createRouter({
@@ -15,5 +16,6 @@ export const router = createRouter({
     { path: '/workbench', component: WorkbenchView, meta: { title: '确认工作台' } },
     { path: '/writeback', component: WritebackView, meta: { title: '双写回' } },
     { path: '/chat', component: ChatView, meta: { title: '问答' } },
+    { path: '/observe', component: ObserveView, meta: { title: '观测' } },
   ],
 })

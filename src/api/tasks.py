@@ -67,6 +67,11 @@ def current(tm: TaskManager = Depends(get_task_manager)):
     return _run_out(tm, run) if run else None
 
 
+@router.get("", response_model=list[RunOut])
+def history(tm: TaskManager = Depends(get_task_manager)):
+    return [_run_out(tm, run) for run in tm.list()]
+
+
 @router.get("/{run_id}", response_model=RunOut)
 def get_run(run_id: str, tm: TaskManager = Depends(get_task_manager)):
     run = tm.get(run_id)
