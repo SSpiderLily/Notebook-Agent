@@ -52,6 +52,52 @@ class ArtifactService:
         versions = sorted((p for p in self.root.glob("v*" ) if p.is_dir()), key=lambda p: p.name, reverse=True)
         for old in versions[self.versions_keep:]: shutil.rmtree(old, ignore_errors=True)
 
+    def _validate_relative(self, relative: str) -> Path:
+        path = Path(relative)
+        if path.is_absolute() or not path.parts or path.parts[0] != "_noteagent":
+            raise ValueError("产物路径必须位于 _noteagent/ 下")
+        resolved = (self.vault_dir / path).resolve(strict=False)
+        if self.root.resolve() not in resolved.parents:
+            raise ValueError("产物路径超出 _noteagent/ 范围")
+        return resolved
+
+    def list_versions(self, relative: str) -> list[dict[str, Any]]:
+        """列出一个产物的当前版本与仍保留的历史版本。"""
+        path = self._validate_relative(relative)
+        if not path.is_file():
+            raise FileNotFoundError(relative)
+        name = path.name
+        versions: list[dict[str, Any]] = []
+        current = (max((int(p.relative_to(self.root).parts[0][1:]) for p in self.root.glob("v*/**/" + name) if p.is_file()), default=0) + 1)
+        versions.append({"version": current, "current": True, "path": relative,
+                         "content_hash": hashlib.sha256(path.read_bytes()).hexdigest()})
+        rel_parent = Path(relative).parent.relative_to("_noteagent")
+        for archive in sorted(self.root.glob("v*/" + str(rel_parent / name)), reverse=True):
+            try:
+                version = int(archive.relative_to(self.root).parts[0][1:])
+            except (ValueError, IndexError):
+                continue
+            versions.append({"version": version, "current": False,
+                             "path": relative,
+                             "content_hash": hashlib.sha256(archive.read_bytes()).hexdigest()})
+        return versions
+
+    def rollback(self, relative: str, version: int) -> dict[str, Any]:
+        """将产物回退到归档版本；当前内容先通过 SafeWriter 备份。"""
+        path = self._validate_relative(relative)
+        if not path.is_file():
+            raise FileNotFoundError(relative)
+        if version < 1:
+            raise ValueError("版本号必须为正整数")
+        archive = self.root / f"v{version}" / Path(relative).relative_to("_noteagent")
+        archive = archive.resolve(strict=False)
+        if self.root.resolve() not in archive.parents or not archive.is_file():
+            raise FileNotFoundError(f"历史版本不存在: {version}")
+        content = archive.read_text(encoding="utf-8")
+        changed = self.writer.apply(relative, content, confirm=True)
+        return {"path": relative, "version": version, "changed": changed,
+                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+
     def generate(self, trees: Sequence[Mapping[str, Any]], nodes_by_tree: Mapping[str, Sequence[Mapping[str, Any]]], events: Mapping[int, Mapping[str, Any]], notes: Mapping[str, Mapping[str, Any]], run_id: str) -> dict[str, Any]:
         results, links = [], {}
         for tree in trees:
