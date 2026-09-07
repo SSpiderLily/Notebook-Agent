@@ -28,6 +28,7 @@ class TaskManager:
         api_base: str | None = None,
         api_key: str | None = None,
         llm_concurrency: int = 1,
+        assoc_min_similarity: float | None = None,
     ) -> None:
         self.vault_dir = Path(vault_dir)
         self.db_path = Path(db_path)
@@ -39,6 +40,7 @@ class TaskManager:
         self.api_base = api_base
         self.api_key = api_key
         self.llm_concurrency = llm_concurrency
+        self.assoc_min_similarity = assoc_min_similarity
         self._lock = threading.Lock()
         self._cancel_events: dict[str, threading.Event] = {}
         self._pipeline: Pipeline | None = None
@@ -57,6 +59,7 @@ class TaskManager:
                 api_base=self.api_base,
                 api_key=self.api_key,
                 llm_concurrency=self.llm_concurrency,
+                assoc_min_similarity=self.assoc_min_similarity,
             )
         return self._pipeline
 

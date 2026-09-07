@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     agent_max_steps: int = 12  # 每个事件最大步数
     confidence_review_threshold: float = 0.6  # 低于此置信度进入人工复核队列
 
+    # ── 关联推断（DESIGN.md 4.1 / FR-3）──
+    assoc_min_similarity: float | None = None  # 语义候选距离阈值（越小越相似）；None=不启用，仅 top-k 命中即算
+
     @field_validator('host')
     @classmethod
     def valid_host(cls, value):

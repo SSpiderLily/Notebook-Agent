@@ -27,6 +27,7 @@ def main() -> None:
         api_base=settings.openai_base_url,
         api_key=settings.openai_api_key or None,
         llm_concurrency=settings.llm_concurrency,
+        assoc_min_similarity=settings.assoc_min_similarity,
     )
     app = create_app(tm)
 

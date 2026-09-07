@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy import ForeignKey, String, UniqueConstraint, inspect, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # 九阶段固定枚举（confirm 为 Web 人工环节，不占运行态）
@@ -147,7 +148,12 @@ class Event(Base):
 
 
 class Association(Base):
-    """笔记间关联（DESIGN.md 4.1 associations，FR-3）：带证据的关联判定结果。"""
+    """笔记间关联（DESIGN.md 4.1 associations，FR-3）：带证据的关联判定结果。
+
+    追加字段（related/input_digest/model/updated_at）支撑跨 Run 判定缓存：
+    输入未变的候选对可复用既有判定而跳过 LLM（增量不重判）。可空，旧库经
+    `ensure_schema_columns` 增列补齐。
+    """
 
     __tablename__ = "associations"
     __table_args__ = (
@@ -162,6 +168,11 @@ class Association(Base):
     confidence: Mapped[float] = mapped_column(default=0.0)
     evidence: Mapped[str] = mapped_column(String, default="[]")  # JSON list
     run_id: Mapped[str] = mapped_column(String(36), index=True)
+    # ── 跨 Run 判定缓存字段（可空，旧库经增列迁移补齐）──
+    related: Mapped[bool | None] = mapped_column(nullable=True)  # 判定结果（含否定，不再只存 True）
+    input_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 候选对两侧笔记内容指纹
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 判定所用 LLM 模型
+    updated_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class Stage(Base):
@@ -323,3 +334,32 @@ class WritebackItem(Base):
     preview_hash: Mapped[str] = mapped_column(String(64), default="")  # 绑定当时内容的令牌
     applied: Mapped[bool] = mapped_column(default=False)
     error: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+# ── 幂等增列迁移（轻量演进，无 alembic）──
+
+# 追加可空列的既有表：{表名: {列名: 列定义}}。
+# `Base.metadata.create_all` 不会为已存在的表补列，故在 create_all 后调用本函数补列。
+_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "associations": {
+        "related": "BOOLEAN",
+        "input_digest": "VARCHAR(64)",
+        "model": "VARCHAR(64)",
+        "updated_at": "VARCHAR(32)",
+    },
+}
+
+
+def ensure_schema_columns(engine: Engine) -> None:
+    """为已存在的既有表幂等补列（SQLite：ALTER TABLE ADD COLUMN；已存在则跳过）。"""
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        existing_tables = set(inspector.get_table_names())
+        for table, columns in _ADDITIVE_COLUMNS.items():
+            if table not in existing_tables:
+                continue
+            existing_cols = {c["name"] for c in inspector.get_columns(table)}
+            for name, coldef in columns.items():
+                if name in existing_cols:
+                    continue
+                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {coldef}'))

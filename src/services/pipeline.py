@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any, Callable
 from sqlalchemy import create_engine, delete, or_, select
 from sqlalchemy.orm import Session
 
-from src.core.association import generate_candidates, judge_candidates
+from src.core.association import AssociationJudgement, generate_candidates, judge_candidates
 from src.core.extraction import ExtractionError, extract_note
 from src.data.collection import Collector
 from src.data.vector_store import ChromaVectorStore, local_hash_embedding
@@ -27,6 +28,8 @@ from src.models.orm import (
     Note,
     Tree,
     TreeNode,
+    ensure_schema_columns,
+    now_iso,
 )
 from src.agents.tree_builder import TreeBuilder
 from src.core.tree_rebuild import DraftForest, DraftTree, TreeAssignment, merge_verified_forest
@@ -37,7 +40,7 @@ from src.models.orm import Artifact
 
 class Pipeline:
     """最小可观测核心链路：采集 → Replay 抽取 → SQLite 持久化 → 关联（Chroma+LLM 判定）。"""
-    def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None, model: str | None = None, api_base: str | None = None, api_key: str | None = None, llm_concurrency: int = 1):
+    def __init__(self, vault_dir: Path | str, db_path: Path | str, runs_dir: Path | str, recordings_dir: Path | str, mode: str = "replay", *, chroma_path: Path | str | None = None, embedding_function: Callable[[list[str]], list[list[float]]] | None = None, embedding_model: str = "local-hash-v1", transport: Callable[[str], str] | None = None, model: str | None = None, api_base: str | None = None, api_key: str | None = None, llm_concurrency: int = 1, assoc_min_similarity: float | None = None):
         self.db_path = Path(db_path)
         self.rm = RunManager(self.db_path)
         self.io = StageIO(runs_dir)
@@ -48,12 +51,15 @@ class Pipeline:
         # LLM 判定环节并发度：<=1 保持顺序（测试/确定性场景），>1 用线程池并发真实调用。
         # gateway 已在内部加锁保护成本/台账，并发安全。
         self.llm_concurrency = llm_concurrency
+        # 语义候选距离阈值（越小越相似）；None=不启用，仅 top-k 命中即算候选（保持既有行为）。
+        self.assoc_min_similarity = assoc_min_similarity
         self.snapshot_path = Path(runs_dir).parent / "collection_snapshot.json"
         self.engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
         self.chroma_path = Path(chroma_path) if chroma_path is not None else Path(db_path).parent / "chroma"
         self.embedding_function = embedding_function if embedding_function is not None else local_hash_embedding
         self.embedding_model = embedding_model
         Base.metadata.create_all(self.engine)
+        ensure_schema_columns(self.engine)
 
     def retry_failed(self, run_id: str) -> dict:
         """按 extract 产物中的失败清单重试，不重跑已成功条目。
@@ -305,7 +311,7 @@ class Pipeline:
                         if mt:
                             updated_at = datetime.fromtimestamp(mt).isoformat(timespec="seconds")
                         keywords = list(json.loads(ex.keywords)) if isinstance(ex.keywords, str) else (ex.keywords or [])
-                        assoc_notes.append({"id": note["note_id"], "folder": note.get("folder", ""), "filename": note.get("filename", ""), "title": ex.title, "summary": ex.summary, "keywords": keywords, "updated_at": updated_at})
+                        assoc_notes.append({"id": note["note_id"], "folder": note.get("folder", ""), "filename": note.get("filename", ""), "title": ex.title, "summary": ex.summary, "keywords": keywords, "updated_at": updated_at, "content_hash": note.get("content_hash", "")})
                     ex_ids = [ex.id for ex in latest.values()]
                     if ex_ids:
                         event_rows = list(session.scalars(select(Event).where(Event.extraction_id.in_(ex_ids))))
@@ -322,13 +328,31 @@ class Pipeline:
                     for e in event_rows
                 ])
                 store.add_notes(assoc_notes)
-                candidates = generate_candidates(assoc_notes, vector_store=store, k=5)
+                candidates = generate_candidates(assoc_notes, vector_store=store, k=5, min_similarity=self.assoc_min_similarity)
                 call_start = len(self.gateway.calls)
-                # 失败隔离：单个候选判定失败不中断整个阶段
+                # 跨 Run 判定缓存：输入未变的候选对复用既有判定，跳过 LLM（增量不重判）。
+                # input_digest = 候选对两侧笔记内容指纹；换模型或内容变化即失效重判。
+                note_hash = {n["id"]: n.get("content_hash", "") for n in assoc_notes}
+                def _input_digest(src_id: str, dst_id: str) -> str:
+                    return hashlib.sha256(f"{note_hash.get(src_id, '')}|{note_hash.get(dst_id, '')}".encode("utf-8")).hexdigest()
+                model_name = getattr(self.gateway, "model", "")
+                cached_by_pair: dict[tuple[str, str], Association] = {}
+                with Session(self.engine) as session:
+                    for pair in ((c.source_id, c.target_id) for c in candidates):
+                        cached_by_pair[pair] = session.scalar(select(Association).where(Association.src_type == "note", Association.src_id == pair[0], Association.dst_id == pair[1]))
+                # 命中缓存的候选直接复用判定；其余走 LLM（并发/顺序），失败隔离。
                 judgements, failed = [], []
+                fresh: list[Any] = []
+                for cand in candidates:
+                    existing = cached_by_pair.get((cand.source_id, cand.target_id))
+                    digest = _input_digest(cand.source_id, cand.target_id)
+                    if existing is not None and existing.input_digest == digest and existing.model == model_name and existing.related is not None:
+                        judgements.append(AssociationJudgement(source_id=cand.source_id, target_id=cand.target_id, related=bool(existing.related), confidence=existing.confidence, evidence=json.loads(existing.evidence or "[]"), rationale="复用历史判定（输入未变）"))
+                    else:
+                        fresh.append(cand)
                 if self.llm_concurrency <= 1:
                     # 顺序判定（确定性场景/测试）
-                    for cand in candidates:
+                    for cand in fresh:
                         try:
                             judgements.append(judge_candidates(self.gateway, [cand])[0])
                         except Exception as exc:
@@ -342,15 +366,13 @@ class Pipeline:
                         except Exception as exc:
                             return ("err", {"source_id": cand.source_id, "target_id": cand.target_id, "error": str(exc)})
                     with ThreadPoolExecutor(max_workers=self.llm_concurrency, thread_name_prefix="assoc") as ex:
-                        for status, val in ex.map(_judge, candidates):
+                        for status, val in ex.map(_judge, fresh):
                             (judgements if status == "ok" else failed).append(val)
                 with Session(self.engine) as session:
                     for call in self.gateway.calls[call_start:]:
                         session.add(LLMCall(run_id=run_id, stage="associate", caller="association_judger", model=call["model"], prompt_tokens=call.get("prompt_tokens", 0), completion_tokens=call.get("completion_tokens", 0), cost_est=call.get("cost_est", 0.0), retries=call.get("retries", 0), status=call.get("status", "ok"), digest=call["digest"]))
                     cand_by_pair = {(c.source_id, c.target_id): c for c in candidates}
                     for j in judgements:
-                        if not j.related:
-                            continue
                         cand = cand_by_pair.get((j.source_id, j.target_id))
                         basis = sorted(cand.features.keys()) if cand and cand.features else (cand.basis if cand else [])
                         association = session.scalar(select(Association).where(Association.src_type == "note", Association.src_id == j.source_id, Association.dst_id == j.target_id))
@@ -362,6 +384,11 @@ class Pipeline:
                         association.confidence = j.confidence
                         association.evidence = json.dumps(j.evidence, ensure_ascii=False)
                         association.run_id = run_id
+                        # 缓存字段：记录判定结果（含否定）、内容指纹、模型，供跨 Run 复用
+                        association.related = j.related
+                        association.input_digest = _input_digest(j.source_id, j.target_id)
+                        association.model = model_name
+                        association.updated_at = now_iso()
                     session.commit()
                 assoc_path = self.io.write(run_id, "associate", {"candidates": [c.model_dump() for c in candidates], "judgements": [j.model_dump() for j in judgements], "failures": failed})
                 self.rm.bump_items(run_id, "associate", total=len(candidates), done=len(judgements), failed=len(failed))

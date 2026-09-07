@@ -33,6 +33,7 @@ from src.models.orm import (
     Base,
     Run,
     Stage,
+    ensure_schema_columns,
     now_iso,
 )
 
@@ -70,6 +71,7 @@ class RunManager:
         self._setup_pragmas()
         self._setup_immediate_begin()
         Base.metadata.create_all(self.engine)
+        ensure_schema_columns(self.engine)
         self._session_factory = sessionmaker(bind=self.engine, expire_on_commit=False)
         if recover_orphans_on_startup:
             # 启动策略：服务（重）启动即回收遗留 running，避免僵尸锁阻塞新任务

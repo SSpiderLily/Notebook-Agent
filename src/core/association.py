@@ -42,6 +42,12 @@ def generate_candidates(notes: list[Any], vector_store: Any = None, *, k: int = 
             basis, evidence, features = [], [], {}
             if sfolder and sfolder == tfolder:
                 basis.append("folder"); evidence.append(f"同文件夹: {sfolder}"); features["folder"] = 1.0
+            # 关键词相交是同文件夹内候选的保守补充信号，避免整目录两两送入模型。
+            source_keywords = {str(x).strip().lower() for x in (_value(source, "keywords", []) or []) if str(x).strip()}
+            target_keywords = {str(x).strip().lower() for x in (_value(target, "keywords", []) or []) if str(x).strip()}
+            common_keywords = sorted(source_keywords & target_keywords)
+            if common_keywords:
+                basis.append("keyword"); evidence.append(f"关键词相交: {', '.join(common_keywords)}"); features["keyword"] = 1.0
             # common naming stem is a useful deterministic signal
             stem_a, stem_b = sname.rsplit(".", 1)[0], tname.rsplit(".", 1)[0]
             if stem_a and stem_b and (stem_a in stem_b or stem_b in stem_a):
@@ -53,7 +59,9 @@ def generate_candidates(notes: list[Any], vector_store: Any = None, *, k: int = 
                 for hit in vector_store.search(str(_value(source, "summary", _value(source, "content", ""))), k=k):
                     if str(hit["id"]) == tid and (min_similarity is None or (hit.get("distance") is not None and hit["distance"] <= min_similarity)):
                         basis.append("semantic"); evidence.append("向量检索相似"); features["semantic"] = 1.0
-            if basis:
+            # 候选门槛：单独"同文件夹"不再进入候选（避免整目录噪声对大量送入模型），
+            # 必须叠加 naming/temporal/semantic/keyword 任一信号，或用关键词相交作为补充。
+            if basis and not (basis == ["folder"]):
                 result[(sid, tid)] = AssociationCandidate(source_id=sid, target_id=tid, basis=basis, evidence=evidence, features=features)
     return list(result.values())
 
