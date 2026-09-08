@@ -62,6 +62,19 @@ class ReorgRequest(BaseModel):
     payload: dict = Field(default_factory=dict)
 
 
+class VaultRegisterRequest(BaseModel):
+    """POST /api/vaults/register：登记一个本地仓库目录。"""
+
+    path: str = Field(min_length=1)
+    name: str | None = None
+
+
+class VaultSwitchRequest(BaseModel):
+    """POST /api/vaults/{id}/switch（状态变更，需 confirm=true）。"""
+
+    confirm: bool = False
+
+
 class WritebackPreviewRequest(BaseModel):
     """POST /api/writeback/preview：kind = tags | links，note_ids 可选筛选。"""
 

@@ -25,7 +25,9 @@ from src.api.chat import router as chat_router
 from src.api.observe import router as observe_router
 from src.api.reset import router as reset_router
 from src.api.artifacts import router as artifacts_router
+from src.api.vaults import router as vaults_router
 from src.api.task_manager import TaskManager
+from src.services.vault_registry import Vault, VaultRegistry
 
 _ALLOWED_HOSTS = {"localhost", "127.0.0.1", "testserver", "test"}
 
@@ -69,9 +71,48 @@ def local_only_middleware(app: FastAPI):
     return app
 
 
+def _make_tm_factory():
+    """按 settings 构造新仓库的 TaskManager（LLM 配置沿用 settings.model_name 等）。"""
+    from src.infra.config import get_settings
+
+    def _factory(vault: Vault) -> TaskManager:
+        settings = get_settings()
+        data_dir = Path(vault.data_dir)
+        return TaskManager(
+            vault_dir=vault.path,
+            db_path=data_dir / "noteagent.db",
+            runs_dir=data_dir / "runs",
+            recordings_dir=data_dir / "llm_recordings",
+            mode=settings.llm_mode,
+            transport=None,
+            model=settings.model_name,
+            api_base=settings.openai_base_url,
+            api_key=settings.openai_api_key or None,
+            llm_concurrency=settings.llm_concurrency,
+            assoc_min_similarity=settings.assoc_min_similarity,
+        )
+
+    return _factory
+
+
 def create_app(tasks: TaskManager, frontend_dist: Path | None = None) -> FastAPI:
     app = FastAPI(title="NoteAgent API", version="0.1.0")
     app.state.tasks = tasks
+    # 仓库注册表：以当前 TM 的 db 父目录为数据根；首次播种默认仓库（沿用现有数据），
+    # 已有注册表则按其 current_id 恢复对应 TM。切换时替换 app.state.tasks。
+    data_root = Path(tasks.db_path).parent
+    registry = VaultRegistry(data_root, tm_factory=_make_tm_factory(), app=app)
+    if registry.current_vault() is None:
+        registry.seed_default(tasks.vault_dir, data_dir=data_root, name=Path(tasks.vault_dir).name)
+        registry.bind_current(tasks)
+    else:
+        cur = registry.current_vault()
+        if Path(cur.path).resolve() == Path(tasks.vault_dir).expanduser().resolve():
+            registry.bind_current(tasks)
+        else:
+            registry.ensure_current()
+    app.state.repos = registry
+    app.state.tasks = registry.current()
     app.include_router(tasks_router)
     app.include_router(forest_router)
     app.include_router(adjustments_router)
@@ -80,6 +121,7 @@ def create_app(tasks: TaskManager, frontend_dist: Path | None = None) -> FastAPI
     app.include_router(observe_router)
     app.include_router(reset_router)
     app.include_router(artifacts_router)
+    app.include_router(vaults_router)
     local_only_middleware(app)
 
     @app.exception_handler(RequestValidationError)

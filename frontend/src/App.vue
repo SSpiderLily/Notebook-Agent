@@ -23,6 +23,7 @@ const route = useRoute()
         <el-menu-item index="/tasks">任务</el-menu-item>
         <el-menu-item index="/chat">问答</el-menu-item>
         <el-menu-item index="/observe">观测</el-menu-item>
+        <el-menu-item index="/settings">仓库</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

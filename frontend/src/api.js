@@ -45,6 +45,11 @@ export function friendlyMessage(err) {
     backup_not_found: '备份不存在',
     confirmation_required: '需要确认才能执行该操作',
     backup_verification_failed: '备份校验失败',
+    vault_not_found: '仓库不存在',
+    vault_exists: '仓库已登记',
+    invalid_vault_dir: '仓库路径无效',
+    run_active: '当前仓库有进行中的任务，请稍后再切换',
+    current_vault: '当前仓库不能移除，请先切换',
   }
   return map[err?.code] || err?.message || '未知错误'
 }
