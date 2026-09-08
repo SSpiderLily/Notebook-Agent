@@ -2,6 +2,7 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import TasksView from './views/TasksView.vue'
 import ForestView from './views/ForestView.vue'
 import WorkbenchView from './views/WorkbenchView.vue'
+import TreeView from './views/TreeView.vue'
 import WritebackView from './views/WritebackView.vue'
 import ChatView from './views/ChatView.vue'
 import ObserveView from './views/ObserveView.vue'
@@ -13,6 +14,7 @@ export const router = createRouter({
     { path: '/', redirect: '/forest' },
     { path: '/tasks', component: TasksView, meta: { title: '任务' } },
     { path: '/forest', component: ForestView, meta: { title: '森林总览' } },
+    { path: '/tree/:id', component: TreeView, meta: { title: '任务树' } },
     { path: '/workbench', component: WorkbenchView, meta: { title: '确认工作台' } },
     { path: '/writeback', component: WritebackView, meta: { title: '双写回' } },
     { path: '/chat', component: ChatView, meta: { title: '问答' } },
