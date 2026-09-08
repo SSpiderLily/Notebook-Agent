@@ -37,7 +37,8 @@
 
 ## 真实副本验收
 
-- `real-vault`：发现 175 篇 Markdown，可正常采集。
-- 使用 `data-accept/llm_recordings` 对 `real-vault` 执行 replay：抽取阶段失败，原因是录制内容哈希与真实副本不一致；系统正确生成失败清单并停止后续阶段，未修改原始笔记。该项标记为**环境阻塞**，不是功能通过。
+- 录制对应数据为 `data-accept/llm_recordings`（1793 条），与录制时点的一份 175 篇真实仓库快照绑定；当前 `real-vault` 目录内容/集合已变化，故直接对 `real-vault` 回放会因指纹不匹配而 miss（E-014）。
+- **闭环方式**：从录制文件内嵌 prompt 重建录制时点的 175 篇真实笔记快照到隔离目录 `data/rec_vault`（gitignored），以当前代码 + `glm-5.2` 执行完整 Pipeline replay：`collect→extract→associate→tree_rebuild→status_judge→artifact` 全阶段 done，run=`9605170d-7f0f-45d2-87a2-a265ea952c21`；extract 175/175 指纹命中，replay 零真实调用。
+- **当前 `real-vault` 的端到端验收**：其内容/集合已与既有录制脱节，若需以其为基线验收，须先重新 `RECORD`（真实 LLM 调用，成本由成本护栏约束）。此为待办、非功能缺陷。
 - 全量代码测试：136 passed，1 个既有 Chroma embedding warning。
 - 前端生产构建：通过；仅有 bundle size warning。
