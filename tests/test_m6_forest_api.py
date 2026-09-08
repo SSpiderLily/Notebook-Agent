@@ -45,6 +45,19 @@ def test_forest_filters_and_tree_detail(tmp_path):
     assert body["nodes"][1]["parent_id"] == 1
     assert body["nodes"][0]["note"]["obsidian_uri"] == "obsidian://open?path=project.md"
 
+    # 任务级视图：进度/完成情况 + 笔记级 note_tree
+    assert body["total_count"] == 1
+    assert body["note_count"] == 1
+    assert body["progress"] == 0.0  # 无已完成事件（状态线索均未标记完成）
+    assert body["done_count"] == 0
+    assert len(body["note_tree"]) == 1
+    note_node = body["note_tree"][0]
+    assert note_node["note_id"] == "n1"
+    assert note_node["title"] == "project.md"  # 无 extraction 时回退文件名
+    assert note_node["event_count"] == 2
+    assert len(note_node["events"]) == 2
+    assert note_node["children"] == []
+
 
 def test_tree_timeline_and_not_found(tmp_path):
     _, client = _env(tmp_path)
