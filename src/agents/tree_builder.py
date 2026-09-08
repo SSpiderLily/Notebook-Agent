@@ -30,14 +30,61 @@ DEFAULT_SYSTEM_PROMPT = SystemMessage(
 )
 
 
+def _split_json_stream(text: str) -> list[dict[str, Any]]:
+    """把一段文本里可能拼接的多个 JSON 对象拆成 list（容忍噪音/截断前的部分）。
+
+    真实 Provider 常把整段推理轨迹（多个工具调用 + 终态判定）一次性拼接返回，
+    glue 里没有分隔符，`json.loads` 会报 `Extra data`。用 incremental 解码逐对象切分，
+    保证每个可解析对象都能被提取验证。
+    """
+    objs: list[dict[str, Any]] = []
+    i, n = 0, len(text)
+    dec = json.JSONDecoder()
+    while i < n:
+        # 跳过每个对象之间的噪音字符
+        while i < n and not text.startswith("{", i):
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, end = dec.raw_decode(text, i)
+        except json.JSONDecodeError:
+            i += 1  # 无法继续则跳过该位置，尝试下一个
+            continue
+        if isinstance(obj, dict):
+            objs.append(obj)
+        i = end
+    return objs
+
+
+def _norm_tool_arg(arg: Any) -> Any:
+    """归一化异常参数形态。
+
+    真实模型常把工具 schema 误当参数输出，例如给 `search_candidate_trees` 传
+    `{"query": {"title": "..."}}` 或 `{"properties": {...}}`，而不是字符串 query。
+    这里把非字符串值里的 `title`/`query`/`value` 字段解包为真正要查询的内容。
+    """
+    if not isinstance(arg, dict):
+        return arg
+    # 形如 {"query": {"title": "X"}} / {"query": {"query": "X"}} → 取内层 title/query/value
+    for key in ("query", "title", "value"):
+        inner = arg.get(key)
+        if isinstance(inner, dict):
+            for k2 in ("title", "query", "value", "content"):
+                if k2 in inner and isinstance(inner[k2], str):
+                    return inner[k2]
+    return arg
+
+
 def _parse_gateway_response(raw: Any, call_id: str) -> AIMessage:
     """把 Gateway/transport 返回解析为工具调用或纯文本 AIMessage。
 
     协议：
     - `{"tool": "...", "args": {...}}` → 工具调用 AIMessage（触发 ReAct 下一轮）；
     - `{"tool_calls": [...]}` → 多工具调用；
-    - 真实 Provider 常自由输出 `{args JSON} to=工具 json` 混排、DSML `<DSML>invoke`/`<|DSML|>`、
-      XML `<toolcall>` 块，统一容错提取；JSON 可解析但无法识别为工具调用时按终态纯文本处理。
+    - `{"tree_id": "...", ...}` → 终态 TreeAssignment 判定（纯文本，收敛 ReAct）；
+    - 真实 Provider 常自由输出：拼接的多个 JSON 对象、`{args} to=工具 json` 混排、
+      DSML `<DSML>invoke`/`<|DSML|>`、XML `<toolcall>` 块，统一容错提取。
     """
     if isinstance(raw, str):
         normalized = raw.strip()
@@ -56,7 +103,22 @@ def _parse_gateway_response(raw: Any, call_id: str) -> AIMessage:
         if "tool" in data:
             name = str(data["tool"])
             args = data.get("args") or {}
-            return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id}])
+            args = _norm_tool_arg(args)
+            return AIMessage(content="", tool_calls=[{"name": name, "args": args if isinstance(args, dict) else {"query": args}, "id": call_id}])
+        if "tree_id" in data:  # 终态判定，纯文本收敛
+            return AIMessage(content=json.dumps(data, ensure_ascii=False))
+    # 单个对象解析失败：可能是一段拼接的 JSON 对象流（整段推理轨迹一次性返回）
+    if isinstance(raw, str) and data is None:
+        objs = _split_json_stream(normalized)
+        if objs:
+            # 若流里存在终态判定（含 tree_id），直接以最后一个作为终态，避免 Agent 空转至步数耗尽
+            assignment = next((o for o in reversed(objs) if isinstance(o, dict) and "tree_id" in o), None)
+            if assignment is not None:
+                return AIMessage(content=json.dumps(assignment, ensure_ascii=False))
+            # 否则返回首个可用的工具调用（逐个执行，仍由步数护栏兜底）
+            for o in objs:
+                if isinstance(o, dict) and "tool" in o:
+                    return _parse_gateway_response(o, call_id)
     if isinstance(raw, str):
         text = raw.strip()
         # DSML / sklearn 风格 `<DSML>invoke name="..."` / `<tool_call>` / `<toolcall>` XML 块

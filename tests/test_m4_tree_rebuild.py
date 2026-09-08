@@ -193,3 +193,34 @@ def test_parse_gateway_response_tolerates_real_provider_formats():
     assert msg.tool_calls, "DSML 标签应识别为工具调用而非纯文本"
     assert msg.tool_calls[0]["name"] == "search_candidate_trees"
     assert msg.tool_calls[0]["args"] == {"query": "跑步 计划"}
+
+
+def test_parse_gateway_response_concatenated_stream_and_terminal():
+    """回归：真实 Provider 常把整段推理轨迹（多个工具调用 + 终态判定）拼接成一个字符串返回，
+    无分隔符甚至夹带噪音；必须拆出终态 TreeAssignment 让 ReAct 收敛，且归一化嵌套参数。
+    """
+    from src.agents.tree_builder import _parse_gateway_response
+
+    # 多个工具调用拼接 + 末尾终态判定（真实 glm 系 Provider 输出）
+    stream = (
+        '{"tool":"search_candidate_trees","args":{"properties":{"query":{"title":"面向对象"}},'
+        '"required":["query"],"title":"search_candidate_trees","type":"object"}}'
+        '{"tool":"search_events","args":{"query":"学习面向对象"}}'
+        '{"tree_id":"NEW","parent_event_id":null,"confidence":0.82,"evidence":"独立学习主题",'
+        '"action":"append"}'
+    )
+    msg = _parse_gateway_response(stream, "c1")
+    assert not msg.tool_calls, "流内含终态时应优先返回终态纯文本而非工具调用"
+    data = json.loads(msg.content)
+    assert data["tree_id"] == "NEW"
+    assert data["confidence"] == 0.82
+
+    # 只有工具调用流（无终态）→ 返回首个工具调用，且嵌套 schema 参数被归一化为字符串
+    tools_only = (
+        '{"tool":"search_candidate_trees","args":{"query":{"title":"晨跑"}}}'
+        '{"tool":"search_events","args":{"query":"晨跑"}}'
+    )
+    msg = _parse_gateway_response(tools_only, "c2")
+    assert msg.tool_calls, "无终态时应返回首个工具调用"
+    assert msg.tool_calls[0]["name"] == "search_candidate_trees"
+    assert msg.tool_calls[0]["args"] == {"query": "晨跑"}, "嵌套 schema 参数应归一化为字符串 query"
