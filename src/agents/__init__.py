@@ -1,4 +1,5 @@
-from .tree_builder import GatewayChatModel, TreeAssignment, TreeBuilder
-from .tools import build_tools, validate_assignment, TOOL_NAMES
+"""Agent 入口：问答服务。树重建已采用单次结构化判断器，不再使用 ReAct 工具型 Agent。"""
 
-__all__ = ["GatewayChatModel", "TreeAssignment", "TreeBuilder", "build_tools", "validate_assignment", "TOOL_NAMES"]
+from .qa import QAService
+
+__all__ = ["QAService"]

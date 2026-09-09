@@ -2,9 +2,9 @@
 
 Obsidian 笔记自动整理智能体：本机运行的本地 Web 服务（后端 Python + FastAPI，前端 Vue 3 + Vite）。
 
-笔记本质是"森林"结构——一个任务/想法 = 一棵树，后续动作/事件 = 节点，事件完成则路径闭合。系统通过 **采集 → 事件抽取 → 关联推断 → 树重建（ReAct Agent）→ 状态判定/断头检测 → 产物生成 → Web 确认 → 双写回** 重建这棵森林。
+笔记本质是"森林"结构——一个任务/想法 = 一棵树，后续动作/事件 = 节点，事件完成则路径闭合。系统通过 **采集 → 事件抽取 → 关联推断 → 树重建（单次结构化判断器）→ 状态判定/断头检测 → 产物生成 → Web 确认 → 双写回** 重建这棵森林。
 
-- **当前阶段**：M0–M9 核心实现已完成；观测页、运行历史、失败/Vault 状态查询、生成物安全重置已落地，真实副本验收为收尾项。
+- **当前阶段**：M0–M9 核心实现已完成；观测页、运行历史、失败/Vault 状态查询、生成物安全重置已落地，真实副本验收为收尾项。第 14 轮需求已将树重建从多轮 ReAct Agent 简化为单次结构化调用（控制成本、恢复确定性回放）。
 - **需求与设计**：完整需求见 [REQUIREMENTS.md](REQUIREMENTS.md)（SRS v1.0，为一切开发的依据）；概要设计见 [DESIGN.md](DESIGN.md)（分层架构、数据模型、API 契约、里程碑 M0–M9）。
 
 ## 当前进度（里程碑）
@@ -15,7 +15,7 @@ Obsidian 笔记自动整理智能体：本机运行的本地 Web 服务（后端
 | M1 | 采集、解析、对账：Vault 递归扫描、稳定 ID/内容哈希、YAML/标签/双链解析、变更快照、试算报告 | ✅ 完成 |
 | M2 | 事件抽取：LLM 批量抽取、SQLite 持久化、增量跳过、失败隔离与重试、调用台账与成本护栏、真实 Provider 接入 | ✅ 完成 |
 | M3 | 向量与关联推断：Chroma 双集合、确定性嵌入、模型指纹检测、文件夹/命名/时间/语义候选、LLM 关联判定（并发化） | ✅ 完成 |
-| M4 | 树重建 Agent 与状态判定：LangGraph ReAct 工具 Agent、草稿森林、verified 只追加、四状态断头检测、人工复核 | ✅ 完成 |
+| M4 | 树重建与状态判定：单次结构化树重建判断器（每事件一次调用）、草稿森林、verified 只追加、四状态断头检测、人工复核、逐事件进度上报 | ✅ 完成 |
 | M5 | 产物生成：Markdown 树页 + 森林总览、SafeWriter 原子写入、版本目录、幂等重跑 | ✅ 完成 |
 | M6 | Web 查询与人工修正：森林/树查询、时间线、obsidian:// 跳转、Adjustment（set_status/retitle/move）、撤销、局部重生成 | ✅ 完成 |
 | M7 | 双写回：标签/双链写回、diff 预览、逐项确认、备份恢复、只增不删、幂等原子写 | ✅ 完成 |
@@ -27,7 +27,7 @@ Obsidian 笔记自动整理智能体：本机运行的本地 Web 服务（后端
 ## 核心流程
 
 ```
-采集 → 事件抽取 → 关联推断 → 树重建(ReAct) → 状态判定/断头 → 产物生成(树页+森林总览)
+采集 → 事件抽取 → 关联推断 → 树重建(单次结构化判断) → 状态判定/断头 → 产物生成(树页+森林总览)
      → Web 确认/人工修正 → 双写回(标签+双链)
 ```
 
@@ -39,10 +39,10 @@ Obsidian 笔记自动整理智能体：本机运行的本地 Web 服务（后端
 NoteAgent/
 ├── src/
 │   ├── data/         # 数据层：models/loader/parser/processor/collection/vector_store
-│   ├── core/         # 业务抽象层 Base* ABC + 实现：association/extraction/status/tree_rebuild/artifact/agent…
+│   ├── core/         # 业务抽象层 Base* ABC + 实现：association/extraction/status/tree_rebuild/artifact…
 │   ├── infra/        # 基础设施：config / llm_gateway / safe_writer / backup / logging / run_manager / stage_io
 │   ├── api/          # FastAPI Web 层：app / task_manager / chat / forest / writeback / adjustments / schemas
-│   ├── agents/       # 真 Agent（ReAct 工具型）：tree_builder（树重建）/ qa（问答）/ tools
+│   ├── agents/       # 真 Agent：qa（问答会话）
 │   ├── services/     # 业务编排：pipeline / writeback / artifact / adjustment
 │   ├── models/orm.py # SQLite ORM（SQLAlchemy + Alembic 迁移）
 │   ├── config/       # 旧版 dotenv 配置（已被 src/infra/config.py 取代，勿再依赖）

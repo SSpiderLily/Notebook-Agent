@@ -213,6 +213,44 @@ def load_forest(io: StageIO, run_id: str) -> DraftForest:
                        failures=data.get("failures", []))
 
 
+# ── 单次结构化判断器（简化后的默认树重建路径）──
+
+def build_assignment_prompt(event: Mapping[str, Any], *, verified_context: str = "") -> str:
+    """构造单事件的树挂接判定提示词（TreeAssignment schema 一致）。
+
+    与 extraction/association 判断器同一套"单次结构化调用"风格：
+    事件已附关联证据与摘要，模型直接输出挂接判定，无需多轮工具往返。
+    已确认结构的语境用 verified_context 传入（追加原则只允许在其上追加叶子）。
+    """
+    return (
+        "判断下面这个事件应挂接到哪棵树（同一任务/想法的后续推进），还是作为新树起点。\n"
+        '只输出一个 JSON 对象，不要解释、不要 Markdown 围栏。字段：\n'
+        "tree_id（字符串：目标树ID，或 NEW 表示新建树）、\n"
+        "parent_event_id（整数或 null：父事件ID，根节点为 null）、\n"
+        "confidence（0~1 数字：挂接置信度）、\n"
+        "evidence（字符串：判定依据）、\n"
+        "action（字符串：固定为 append）。\n"
+        + (f"已有树（只能选其中一个 tree_id，且仅能追加叶子，不得重组/移动/拆分）：\n{verified_context}\n" if verified_context else "")
+        + f"事件及其关联证据：{json.dumps(dict(event), ensure_ascii=False, default=str)}"
+    )
+
+
+def assign_event(
+    gateway: Any,
+    event: Mapping[str, Any],
+    *,
+    verified_context: str = "",
+) -> TreeAssignment:
+    """单次结构化调用把一个事件判定为挂到某树或新建树。
+
+    gateway 需提供 `structured(prompt, schema) -> TreeAssignment`。这是
+    树重建的简化判断器：每事件恰好一次 LLM 调用（与抽取/关联/状态同风格），
+    取代原多轮 ReAct Agent。失败由调用方按失败隔离处理。
+    """
+    raw = gateway.structured(build_assignment_prompt(event, verified_context=verified_context), TreeAssignment)
+    return raw.model_copy(update={"event_id": event.get("event_id"), "note_id": event.get("note_id")})
+
+
 # ── 编排入口 ──
 
 def rebuild_forest(

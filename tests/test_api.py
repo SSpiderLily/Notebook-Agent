@@ -70,7 +70,8 @@ def test_preview_returns_estimate(client):
     data = resp.json()
     assert data["notes"] == 1
     assert data["characters"] > 0
-    assert data["calls"] == 1
+    # 预估调用 = 抽取(每篇1) + 树重建(每事件1，默认 2 事件/篇) = 3
+    assert data["calls"] == 3
     assert data["estimated_cost_cny"] >= 0
 
 

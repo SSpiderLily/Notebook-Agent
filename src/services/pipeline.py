@@ -31,8 +31,7 @@ from src.models.orm import (
     ensure_schema_columns,
     now_iso,
 )
-from src.agents.tree_builder import TreeBuilder
-from src.core.tree_rebuild import DraftForest, DraftTree, TreeAssignment, merge_verified_forest
+from src.core.tree_rebuild import DraftForest, DraftTree, TreeAssignment, assign_event, merge_verified_forest
 from src.core.status import judge_forest, save_statuses
 from src.services.artifact import ArtifactService
 from src.models.orm import Artifact
@@ -435,19 +434,29 @@ class Pipeline:
                             "confidence": a.confidence,
                             "evidence": json.loads(a.evidence or "[]"),
                         })
-                builder = TreeBuilder(self.gateway)
+                # 单次结构化判定：把事件及其关联证据、已验证树语境交给判断器，
+                # 每事件恰好一次 LLM 调用（与抽取/关联/状态同风格，取代原多轮 ReAct Agent）。
+                self.rm.bump_items(run_id, "tree_rebuild", total=len(event_data))
+                verify_event_content = {e["event_id"]: e["content"] for e in event_data}
+                verified_context = "\n".join(
+                    f"tree {tid}: {t.title or '未命名'} :: "
+                    + " | ".join(f"[{verify_event_content.get(nd.event_id, '?')}]" for nd in t.nodes[:10])
+                    for tid, t in verified_trees.items()
+                )
                 failures: list[dict[str, Any]] = []
                 for event in event_data:
                     try:
-                        result = builder.run(
+                        result = assign_event(
+                            self.gateway,
                             {**event, "associations": assoc_by_note.get(event["note_id"], [])},
-                            verified_tree_ids=verified_tree_ids,
+                            verified_context=verified_context,
                         )
-                        item = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+                        item = result.model_dump()
                     except Exception as exc:
-                        # G3：Agent 执行失败不降级为"正常新树"，单独进失败清单待人工复核。
-                        # 计数统一在阶段收尾处统计（bump_items failed 为自增），避免重复累计。
-                        failures.append({"event_id": event["event_id"], "note_id": event["note_id"], "error": f"agent_error: {exc}"})
+                        # 单次判定失败不降级为"正常新树"，单独进失败清单待人工复核。
+                        # 计数在事件循环内即时自增，SSE 进度按事件实时更新。
+                        failures.append({"event_id": event["event_id"], "note_id": event["note_id"], "error": f"assign_error: {exc}"})
+                        self.rm.bump_items(run_id, "tree_rebuild", failed=1)
                         continue
                     item["event_id"] = event["event_id"]
                     item["note_id"] = event["note_id"]
@@ -457,6 +466,7 @@ class Pipeline:
                     tree_nodes.append({"event_id": event["event_id"], "note_id": event["note_id"],
                                        "tree_id": tree_id, "parent_event_id": item.get("parent_event_id"),
                                        "confidence": item.get("confidence", 0.0), "evidence": item.get("evidence", "")})
+                    self.rm.bump_items(run_id, "tree_rebuild", done=1)
                 # 应用追加原则：verified 树原样保留，非法重组归入 rejected（进人工复核队列）
                 draft = DraftForest(
                     assignments=[
@@ -523,7 +533,6 @@ class Pipeline:
                     "failures": failures,
                 }
                 tree_path = self.io.write(run_id, "tree_rebuild", tree_payload)
-                self.rm.bump_items(run_id, "tree_rebuild", total=len(event_data), done=len(assignments), failed=len(merged.rejected) + len(failures))
                 self.rm.set_stage(run_id, "tree_rebuild", "done", checkpoint_path=str(tree_path))
 
                 # ── status_judge：树级四状态 + 证据 + 断头清单（DESIGN.md 6.2 / FR-5）──

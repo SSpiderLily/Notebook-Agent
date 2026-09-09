@@ -40,13 +40,11 @@ src/
 ├── core/                     领域逻辑（沿用 Base* 抽象基类模式）
 │   ├── extraction.py         提炼与事件抽取（LLM·抽取器）
 │   ├── association.py        关联候选生成 + LLM 判定（判断器）
-│   ├── tree_rebuild.py       树重建编排（调用 agents/，执行追加原则）
+│   ├── tree_rebuild.py       树重建单次结构化判断器 + 追加原则编排
 │   ├── status.py             状态判定与断头检测（判断器）
 │   └── artifact.py           树页/森林总览产物生成（撰写者）
-├── agents/                   两个真 Agent
-│   ├── tree_builder.py       树重建 ReAct Agent（工具型）
+├── agents/                   真 Agent（仅问答）
 │   ├── qa.py                 问答对话 Agent（记忆+指令集）
-│   └── tools.py              Agent 工具定义（白名单）
 ├── data/                     数据访问层
 │   ├── loader.py / parser.py # 采集与 Obsidian 解析（改造现有实现）
 │   ├── vector_store.py       Chroma 实现（实现现有 BaseVectorStore，含模型变更检测）
@@ -211,19 +209,18 @@ logs/  (noteagent.log, runs/<run_id>.log)
 
 ## 六、Agent 设计
 
-### 6.1 树重建 Agent（`agents/tree_builder.py`，ReAct）
+### 6.1 树重建（`core/tree_rebuild.py`，单次结构化判断器）
 
-- **输入**：未挂接的事件批次（含其 note 摘要/时间线索/文件夹/命名信号）；已验证树的只读快照
-- **工具白名单**（`agents/tools.py`）：
-  1. `search_candidate_trees(query)`：向量+文件夹+命名检索候选树（含 verified 标记），返回树摘要
-  2. `read_note(note_id)`：回读笔记原文（截断保护）
-  3. `get_tree_timeline(tree_id)`：该树现有节点与时间线
-  4. `search_events(query)`：事件库语义检索
-  5. `submit_assignment(tree_id | NEW, parent_event_id?, confidence, evidence)`：提交判定（终态工具）
-- **追加原则的执行**：Agent 对 `verified=true` 的树只能提交"追加叶子"决策；任何移动/拆分/改父级的决策会被网关层拒绝并记录为建议，进人工复核队列
-- **输出**：挂接决策（含置信度与证据）或"新建树"决策；置信度 < 0.6 自动标记待人工复核
-- **护栏**：最大 12 步/事件、单事件超时、工具白名单硬编码、单 Run 成本上限（LLMGateway 统一执行）
-- **实现**：LangChain tool-calling agent（`create_tool_calling_agent`），底层模型经 LLMGateway
+> 第 14 轮需求（简化模型调用）将树重建从多轮 ReAct 工具型 Agent 降级为**单次结构化判断器**，
+> 与抽取/关联/状态同一套"单次调用 + 证据"风格；真 Agent 仅保留问答。
+
+- **输入**：单个待挂接事件（含其 note 摘要/时间线索/文件夹/命名信号）+ 该事件已持久化的关联证据 + 已验证树的只读语境（追加原则）
+- **判定**：每事件恰好一次 `LLMGateway.structured(prompt, TreeAssignment)`，直接输出挂接决策（tree_id / parent_event_id / confidence / evidence / action）
+- **追加原则的执行**：`merge_verified_forest` 对 `verified=true` 的树只允许追加叶子；任何移动/拆分/改父级判定被拒绝并归入 `rejected`，进人工复核队列
+- **输出**：草稿森林（含置信度与证据）；置信度 < 0.6 自动标记待人工复核
+- **进度**：事件循环内逐事件 `bump_items` 实时上报，SSE 进度条按事件更新（前端任务页不再"卡住"）
+- **失败隔离**：单次判定失败进失败清单，不阻塞后续事件
+- **优势**：调用次数从"每事件多轮"降为"每事件一次"；回放/确定性完全恢复（与抽取/关联同一指纹机制）；移除 LangGraph 工具调用与 ~300 行容错解析
 
 ### 6.2 问答 Agent（`agents/qa.py`，对话型）
 
@@ -254,7 +251,7 @@ logs/  (noteagent.log, runs/<run_id>.log)
 | M1 | 采集/解析/对账 | 递归扫描、frontmatter(YAML)/中文嵌套标签解析、稳定 ID+内容哈希、排除+**忽略机制（frontmatter/glob）**、变更清单、**孤儿对账（missing/ignored 标记+报告）**、**试算报告（篇数/字数/费用/时长预估）** | 样例仓库扫描齐全；改名/删除笔记后对账正确；pytest 覆盖解析与对账；试算数字合理 |
 | M2 | 提炼与事件抽取 | LLM 批量抽取（经 Gateway）、失败清单、增量缓存、events 入库 | 样例仓库全量提炼；重跑零调用；失败项隔离；**用回放夹具离线测试** |
 | M3 | 向量与关联 | Chroma 集合、**模型变更检测**、候选生成（文件夹/命名/向量/时间）、LLM 判定入 associations | 关联带证据可查；**改模型配置后被检测拦截** |
-| M4 | 树重建 Agent + 状态判定 | ReAct Agent、草稿森林、**追加原则执行**、状态/断头判定 | 样例仓库树结构人工核对可接受；断头案例被识别；**verified 树在增量运行中未被自动重组** |
+| M4 | 树重建判断器 + 状态判定 | 单次结构化树重建、草稿森林、**追加原则执行**、状态/断头判定 | 样例仓库树结构人工核对可接受；断头案例被识别；**verified 树在增量运行中未被自动重组** |
 | M5 | 产物生成 | 树页/森林总览 markdown、版本化、`_noteagent/` 写入 | Obsidian 中双链可跳转；特殊文件名笔记链接正确 |
 | M6 | Web 确认工作台 | 森林/树/工作台页面 + 修正 API + 重组建议队列 | 修正持久化并触发局部重生成 |
 | M7 | 双写回 | 标签/双链预览、确认、备份恢复 | diff 与实际一致；幂等；备份可恢复 |
@@ -265,7 +262,7 @@ logs/  (noteagent.log, runs/<run_id>.log)
 
 ## 九、技术选型汇总
 
-- **后端**：Python 3.12、FastAPI、uvicorn、SQLAlchemy 2.0、Alembic、pydantic v2、pydantic-settings、loguru、LiteLLM、LangGraph、langchain-core、chromadb、PyYAML、httpx
+- **后端**：Python 3.12、FastAPI、uvicorn、SQLAlchemy 2.0、Alembic、pydantic v2、pydantic-settings、loguru、LiteLLM、chromadb、PyYAML、httpx（LangGraph/langchain-core 已随 ReAct 树重建移除，不再依赖）
 - **测试**：pytest、pytest-asyncio；核心模块全覆盖（infra/解析/对账/树构建/写回安全），LLM 一律走回放夹具
 - **前端**：Vite、Vue 3、Element Plus
 - **环境管理**：建议 uv（或 venv+pip）；requirements.txt 同步维护
@@ -287,4 +284,4 @@ logs/  (noteagent.log, runs/<run_id>.log)
 | 08-31 | LLM 录制/回放模式，与 pytest 桩同源 | 调试免费、结果可复现、CI 无网络依赖 |
 | 08-31 | 向量库模型指纹校验 | 切换 embedding 模型后相似度静默失效的防护 |
 | 09-01 | LiteLLM 作为 LLM Provider，保留 NoteAgent LLMGateway 为唯一出口 | 统一供应商适配，同时保留 run/stage、成本、台账和回放边界 |
-| 09-01 | 树重建与问答 Agent 采用 LangGraph | 用显式状态图管理工具调用、长流程恢复和多轮会话 |
+| 09-01 | 树重建采用单次结构化判断器，问答保留对话 Agent | 树重建不需要工具往返；每事件一次调用可恢复确定性回放、降低成本与 Provider 格式适配复杂度；问答仍需要多轮记忆与指令集 |

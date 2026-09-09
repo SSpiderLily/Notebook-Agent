@@ -79,10 +79,3 @@ class ArtifactRenderer(BaseArtifactRenderer):
             lines.append(f"| [{title}]({links.get(tid, f'trees/{safe_filename(tid)}.md')}) | `{tree.get('status', 'in_progress')}` | {float(tree.get('confidence') or 0.0):.2f} |")
         lines += ["", "断头路径优先展示；详情见各树页。", ""]
         return "\n".join(lines)
-
-    def export(self, data: Any, output_path: str) -> str:
-        """兼容 BaseExporter 的最小导出接口。"""
-        from pathlib import Path
-        path = Path(output_path)
-        path.write_text(str(data), encoding="utf-8")
-        return str(path)

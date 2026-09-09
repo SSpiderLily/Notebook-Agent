@@ -1,14 +1,14 @@
 # AGENTS.md — NoteAgent
 
-Obsidian 笔记自动整理智能体：笔记本质是"森林"结构（一个任务/想法 = 一棵树，后续动作/事件 = 节点，事件完成则路径闭合）。系统通过 采集 → 事件抽取 → 关联推断 → 树重建（ReAct Agent）→ 状态判定/断头检测 → 产物生成（树页+森林总览）→ Web 确认 → 双写回（标签+双链）重建这棵森林。完整需求见 `REQUIREMENTS.md`（SRS v1.0，已经 13 轮讨论确认，为一切开发的依据）。当前已实现到 M8（本地 Web 服务 + 问答 Agent），前后端均已落地。
+Obsidian 笔记自动整理智能体：笔记本质是"森林"结构（一个任务/想法 = 一棵树，后续动作/事件 = 节点，事件完成则路径闭合）。系统通过 采集 → 事件抽取 → 关联推断 → 树重建（单次结构化判断器）→ 状态判定/断头检测 → 产物生成（树页+森林总览）→ Web 确认 → 双写回（标签+双链）重建这棵森林。完整需求见 `REQUIREMENTS.md`（SRS v1.0，已经 14 轮讨论确认，为一切开发的依据）。当前已实现到 M10（本地 Web 服务 + 问答 Agent），前后端均已落地。
 
 ## 项目结构
 
 - `src/data/` — 数据层：`models.py`（`Note` dataclass）、`loader.py`、`parser.py`、`processor.py`、`collection.py`、`vector_store.py`
-- `src/core/` — 业务抽象层 `Base*` ABC + 具体实现：`association.py`（关联推断）、`extraction.py`（事件抽取）、`status.py`（状态判定/断头检测）、`tree_rebuild.py`、`artifact.py`、`agent.py`/`cot.py`/`analyzer.py`/`exporter.py`
+- `src/core/` — 业务抽象层 `Base*` ABC + 具体实现：`association.py`（关联推断）、`extraction.py`（事件抽取）、`status.py`（状态判定/断头检测）、`tree_rebuild.py`（单次结构化树重建判断器）、`artifact.py`、`note_tree.py`
 - `src/infra/` — 基础设施：`config.py`（pydantic `Settings`，**当前实际配置来源**，经 `src.infra.config.get_settings()` 访问）、`llm_gateway.py`（LLM 唯一出口，含录制/回放）、`safe_writer.py`（一切 vault 写操作唯一通道）、`backup.py`、`logging.py`、`run_manager.py`、`stage_io.py`
 - `src/api/` — FastAPI Web 层：`app.py`（`create_app`）、`task_manager.py`、`chat.py`（M8 问答）、`forest.py`、`writeback.py`（双写回）、`adjustments.py`、`schemas.py`
-- `src/agents/` — 真 Agent（ReAct 工具型）：`tree_builder.py`（树重建）、`qa.py`（问答）、`tools.py`
+- `src/agents/` — 真 Agent：`qa.py`（问答会话）
 - `src/services/` — 业务编排：`pipeline.py`、`writeback.py`、`artifact.py`、`adjustment.py`
 - `src/models/orm.py` — SQLite ORM（SQLAlchemy + Alembic 迁移）
 - `src/config/settings.py` — **旧版** dotenv 配置（已被 `src/infra/config.py` 取代，勿再依赖）
@@ -21,7 +21,7 @@ Obsidian 笔记自动整理智能体：笔记本质是"森林"结构（一个任
 ## 命令
 
 ```bash
-pip install -r requirements.txt                    # langchain/langgraph/chromadb/fastapi/sqlalchemy/pytest…
+pip install -r requirements.txt                    # fastapi/chromadb/sqlalchemy/litellm/pytest…
 python -m src.main                                 # 启动本地 Web 服务（FastAPI + uvicorn），必须从仓库根目录运行
 pytest tests/                                      # 核心逻辑用 pytest（pytest-asyncio 支持异步）
 cd frontend && npm install && npm run dev          # 前端（Vue 3 + Vite）
@@ -36,10 +36,10 @@ python scripts/record-error.py                     # 新增/更新 dev-log/错�
 
 - **gitignore 纪律**：新增重要文件/目录（密钥、运行时产物、虚拟环境、本地工具状态等）时，必须同步写入 `.gitignore` 并提交，确保生成物与敏感信息不进仓库。
 - **产品形态（SRS 已定）**：本机运行的本地 Web 服务——后端 Python + FastAPI，前端 Vue 3（简单展示层）；直接读写 vault 文件夹（唯一数据通道），不要求 Obsidian 运行；前端用 `obsidian://` URI 跳转原笔记。
-- **Agent 架构**：混合架构，主干由代码编排（幂等/断点/成本可控）；仅两个环节用真 Agent——树重建（ReAct 工具型）与问答（多轮+记忆+指令集）；其余 LLM 环节（抽取/判定/撰写）为单次结构化调用。
+- **Agent 架构**：混合架构，主干由代码编排（幂等/断点/成本可控）；**真 Agent 仅问答**（多轮+记忆+指令集）；树重建已简化为单次结构化判断器（每事件一次调用），其余 LLM 环节（抽取/判定/撰写）同为单次结构化调用。
 - **安全边界（最高优先级约束）**：默认绝不修改/移动/删除用户原始笔记；唯一例外是"双写回"（标签回写+双链写回），必须走 Web 预览 → 确认 → 只增不删 → 时间戳备份 → 幂等流程。所有产物写入 vault 内 `_noteagent/` 专用目录。
 - **关键领域事实**：现有笔记无双链，结构隐式；可用信号=文件夹结构+文件命名规律；笔记粒度为一篇多动作（需事件抽取）；树重建输出为"草稿森林"（附证据+置信度），经人工确认后才固化。
-- 技术栈：Python 3.12（`.venv` 已装）、FastAPI + uvicorn、LangChain/LangGraph、Chroma 向量库、SQLite（SQLAlchemy + Alembic）、OpenAI 兼容 API（`.env` 默认 DeepSeek，通义千问经 `OPENAI_BASE_URL`/`MODEL_NAME` 切换）；前端 Vue 3 + Vite；日志用 loguru。全部笔记内容可上云（已确认）。
+- 技术栈：Python 3.12（`.venv` 已装）、FastAPI + uvicorn、Chroma 向量库、SQLite（SQLAlchemy + Alembic）、OpenAI 兼容 API（`.env` 默认 DeepSeek，通义千问经 `OPENAI_BASE_URL`/`MODEL_NAME` 切换）；前端 Vue 3 + Vite；日志用 loguru。全部笔记内容可上云（已确认）。
 - **配置来源是 `src/infra/config.py`**（pydantic `Settings`），经 `src.infra.config.get_settings()` 单例访问；键名见 `src/infra/config.py`（`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`MODEL_NAME`/`LLM_MODE`=record|replay/`LLM_CONCURRENCY`/`VAULT_DIR` 等）。`.env` 与 `.env.example` 均存在。
 - `.env` 含真实 API key，**不要读取/提交其内容**（已 gitignore）。
 - 新核心功能先在 `src/core/` 定义/继承 `Base*` 抽象基类，具体实现放对应子包；核心模块（解析/事件抽取校验/树构建/写回安全）需配 pytest。

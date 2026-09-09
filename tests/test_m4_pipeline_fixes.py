@@ -3,12 +3,12 @@
 从仓库根目录运行：.venv/bin/python -m pytest tests/test_m4_pipeline_fixes.py -q
 
 覆盖：
-- G1：M3 持久化的 note→note 关联证据能传入树 Agent（不再恒为空列表）。
+- G1：M3 持久化的 note→note 关联证据能传入树判断器（不再恒为空列表）。
 - G2：树节点父子关系真正落库（child.parent_id 指向 parent 的 node id）。
-- G3：树 Agent 执行失败进失败清单，不再伪造成"正常新树"。
+- G3：树判定失败进失败清单，不再伪造成"正常新树"。
 
 做法：用真实 Pipeline + RECORD transport 驱动 extract/status 阶段，仅替换
-TreeBuilder 为可控桩（返回建根/追加判定或抛异常），从而精确、离线地验证
+assign_event 为可控桩（返回建根/追加判定或抛异常），从而精确、离线地验证
 pipeline 内 tree_rebuild 段的编排逻辑，不触网、不提交。
 """
 from __future__ import annotations
@@ -23,21 +23,21 @@ from src.models.orm import Association, Tree, TreeNode
 from src.services.pipeline import Pipeline
 
 
-class _StubBuilder:
-    """替换 TreeBuilder：按调用次数返回建根/追加判定，并记录收到的 event。
+class _StubAssign:
+    """替换 pipeline 的 assign_event：按调用次数返回建根/追加判定，并记录收到的 event。
 
-    `fail_at` 指定第几轮调用抛异常（模拟 Agent 失败，用于 G3）。
+    `fail_at` 指定第几轮调用抛异常（模拟单次判定失败，用于 G3）。
     """
 
     def __init__(self, fail_at: int | None = None):
-        self.calls: list[tuple[dict, object]] = []  # (event, verified_tree_ids)
+        self.calls: list[tuple[dict, object]] = []  # (event, verified_context)
         self.fail_at = fail_at
 
-    def run(self, event, verified_tree_ids=None):
-        self.calls.append((event, verified_tree_ids))
+    def __call__(self, gateway, event, *, verified_context=""):
+        self.calls.append((event, verified_context))
         idx = len(self.calls)
         if self.fail_at is not None and idx == self.fail_at:
-            raise RuntimeError("simulated agent failure")
+            raise RuntimeError("simulated assignment failure")
         root_eid = self.calls[0][0]["event_id"]
         if idx == 1:
             return TreeAssignment(tree_id="NEW", event_id=event["event_id"],
@@ -82,15 +82,15 @@ def _mk_pipeline(tmp_path):
                     mode="record", transport=_transport())
 
 
-def _monkeypatch_builder(monkeypatch, pipeline, fail_at=None):
+def _monkeypatch_assign(monkeypatch, pipeline, fail_at=None):
     from src.services import pipeline as pipeline_mod
-    stub = _StubBuilder(fail_at=fail_at)
-    monkeypatch.setattr(pipeline_mod, "TreeBuilder", lambda gateway: stub)
+    stub = _StubAssign(fail_at=fail_at)
+    monkeypatch.setattr(pipeline_mod, "assign_event", stub)
     return stub
 
 
 def test_G1_associations_passed_to_tree_agent(monkeypatch, tmp_path):
-    """G1：预置一条笔记间关联，断言该关联证据被传给树 Agent（非空）。"""
+    """G1：预置一条笔记间关联，断言该关联证据被传给树判断器（非空）。"""
     pipeline = _mk_pipeline(tmp_path)
     # 预置一条 note→note 关联（src 为该笔记 id），验证 tree_rebuild 阶段读取。
     vault_note_id = pipeline.collector.collect()[0]["note_id"]
@@ -98,14 +98,14 @@ def test_G1_associations_passed_to_tree_agent(monkeypatch, tmp_path):
         session.add(Association(src_type="note", src_id=vault_note_id, dst_id="other-note",
                                 basis='["folder"]', confidence=0.9, evidence='[]', run_id="seed"))
         session.commit()
-    stub = _monkeypatch_builder(monkeypatch, pipeline)
+    stub = _monkeypatch_assign(monkeypatch, pipeline)
 
     pipeline.run()
 
-    assert stub.calls, "树 Agent 应至少被调用一次"
+    assert stub.calls, "树判断器应至少被调用一次"
     event, _ = stub.calls[0]
     assocs = event.get("associations")
-    assert assocs, "树 Agent 输入里的 associations 不应为空（G1）"
+    assert assocs, "树判断器输入里的 associations 不应为空（G1）"
     assert any(a["related_note_id"] == "other-note" and "folder" in a["basis"] for a in assocs), \
         "应包含预置关联及其 evidence/basis"
 
@@ -113,7 +113,7 @@ def test_G1_associations_passed_to_tree_agent(monkeypatch, tmp_path):
 def test_G2_tree_node_parent_relationship_persisted(monkeypatch, tmp_path):
     """G2：建根+追加两事件后，DB 中树节点父子关系应正确回填 parent_id。"""
     pipeline = _mk_pipeline(tmp_path)
-    _monkeypatch_builder(monkeypatch, pipeline)
+    _monkeypatch_assign(monkeypatch, pipeline)
 
     pipeline.run()
 
@@ -131,9 +131,9 @@ def test_G2_tree_node_parent_relationship_persisted(monkeypatch, tmp_path):
 
 
 def test_G3_agent_failure_goes_to_failures_not_new_tree(monkeypatch, tmp_path):
-    """G3：Agent 失败的事件应进 failure 清单，而不是伪造成 NEW 树。"""
+    """G3：树判定失败的事件应进 failure 清单，而不是伪造成 NEW 树。"""
     pipeline = _mk_pipeline(tmp_path)
-    stub = _monkeypatch_builder(monkeypatch, pipeline, fail_at=2)  # 第 2 个事件抛异常
+    stub = _monkeypatch_assign(monkeypatch, pipeline, fail_at=2)  # 第 2 个事件抛异常
 
     pipeline.run()
 
@@ -144,11 +144,11 @@ def test_G3_agent_failure_goes_to_failures_not_new_tree(monkeypatch, tmp_path):
     # 通过 StageIO 读取 tree_rebuild 产物（payload 内容，非内层包裹）
     raw = pipeline.io.read(last.id, "tree_rebuild")
     payload = raw["payload"] if isinstance(raw, dict) and "payload" in raw else raw
-    assert any("agent_error" in f["error"] for f in payload["failures"]), \
-        "失败事件应记录 agent_error 到 failures 清单"
+    assert any("assign_error" in f["error"] for f in payload["failures"]), \
+        "失败事件应记录 assign_error 到 failures 清单"
     # 失败事件不得伪造为 0 置信度新树
     assert 0 not in [float(a.get("confidence", 0)) for a in payload["assignments"]], \
-        "不应出现 agent_error 伪树"
+        "不应出现 assign_error 伪树"
     # DB 只应有 1 棵正常树（建根），失败事件不建树
     engine = create_engine(f"sqlite:///{pipeline.db_path}")
     with Session(engine) as session:

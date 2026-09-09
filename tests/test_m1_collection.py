@@ -30,4 +30,4 @@ def test_changes_ignore_and_estimate(tmp_path):
     assert rows[0]['vault_status']=='active'; assert any(r['vault_status']=='ignored' for r in rows)
     old={'ok.md':{'content_hash':'old'},'gone.md':{'content_hash':'x'}}
     change=collector.diff(rows,old); assert 'ok.md' in change.modified; assert change.missing==['gone.md']
-    estimate=collector.estimate(rows,settings(tmp_path)); assert estimate.notes==1; assert estimate.calls==1
+    estimate=collector.estimate(rows,settings(tmp_path)); assert estimate.notes==1; assert estimate.calls==3

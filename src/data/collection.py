@@ -10,6 +10,9 @@ from src.infra.config import Settings, get_settings
 from src.data.loader import NoteLoader
 from src.data.parser import NoteParser
 
+# 试算用的平均事件/篇启发式（FR-2 一篇多动作）：树重建阶段按每事件一次调用估算。
+EVENTS_PER_NOTE = 2.0
+
 @dataclass
 class ChangeSet:
     added: list[str]
@@ -67,8 +70,12 @@ class Collector:
         active = [r for r in rows if r.get("vault_status") == "active"]
         chars = sum(len(r.get("content", "")) for r in active)
         inp, out = settings.price_of(settings.model_name)
-        cost = (chars / 4 * inp + len(active) * 300 * out) / 1_000_000
-        return Estimate(len(active), chars, len(active), round(cost, 6), round(len(active) / 60, 2))
+        # 调用量：抽取(每篇1次) + 树重建(每事件1次，事件按平均每篇 EVENTS_PER_NOTE 估)。
+        # 关联/状态等相对少量且依赖运行时数据，此处不预判，避免误导。
+        events_est = int(len(active) * EVENTS_PER_NOTE)
+        total_calls = len(active) + events_est
+        cost = (chars / 4 * inp + total_calls * 150 * out) / 1_000_000
+        return Estimate(len(active), chars, total_calls, round(cost, 6), round(total_calls / 60, 2))
 
     @staticmethod
     def save_snapshot(path: str | Path, rows: list[dict[str, Any]]) -> None:
